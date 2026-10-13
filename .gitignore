@@ -1,0 +1,24 @@
+
+# Python environment and cache
+.venv/
+__pycache__/
+*.py[cod]
+
+# API keys and secrets
+.env
+.env.*
+!.env.example
+
+# Large downloaded and generated project data
+bills_data/
+clean_data/
+brain/
+test_data/
+
+# IDE files
+.vscode/
+.idea/
+
+# Generated evaluation outputs (optional)
+eval_report.json
+eval_report.txt

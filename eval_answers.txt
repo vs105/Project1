@@ -1,0 +1,215 @@
+BILLS BOT ANSWERS (exact + explain, v1 sources)
+========================================================================
+
+Q (exact): What is the Finance Bill 2024 about?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Finance Bill, 2020 - Bill 26 of 2020 | billPassedInLSFile | Preamble | 1869_26_2020_The Finance Bill, 2020.pdf (official)
+[2] The Finance Bill, 2026 - Bill 3 of 2026 | billPassedInLSFile | Preamble | 1613_3_2026_The Finance Bill, 2026.pdf (official)
+[3] The Finance Bill, 2022 - Bill 18 of 2022 | billPassedInBothHousesFile | Preamble | 2530_18_2022_The Finance Bill, 2022.pdf (official)
+
+Q (explain): What is the Finance Bill 2024 about?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Finance Bill, 2020 - Bill 26 of 2020 | billPassedInLSFile | Preamble | 1869_26_2020_The Finance Bill, 2020.pdf (official)
+[2] The Finance Bill, 2026 - Bill 3 of 2026 | billPassedInLSFile | Preamble | 1613_3_2026_The Finance Bill, 2026.pdf (official)
+[3] The Finance Bill, 2022 - Bill 18 of 2022 | billPassedInBothHousesFile | Preamble | 2530_18_2022_The Finance Bill, 2022.pdf (official)
+
+Q (exact): Tell me about Bill No. 370 of 2019.
+------------------------------------------------------------------------
+Bill No. 370 of 2019 is the CITIZENSHIP (AMENDMENT) BILL, 2019, a bill further to amend the Citizenship Act, 1955 [3]. It provides that (1) the Act may be called the Citizenship (Amendment) Act, 2019 and (2) it shall come into force on such date as the Central Government may, by notification in the Official Gazette, appoint [1][3].
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billPassedInBothHousesFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+[2] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billPassedInLSFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+[3] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billIntroducedFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+
+Q (explain): Tell me about Bill No. 370 of 2019.
+------------------------------------------------------------------------
+Bill No. 370 of 2019 is the **Citizenship (Amendment) Bill, 2019**. It was first introduced in the Lok Sabha [3]. The Bill was passed by the Lok Sabha on 10 December 2019 and by the Rajya Sabha on 11 December 2019, received presidential assent on 12 December 2019, and became **Act No. 47 of 2019** [1]. Its aim is to change (amend) the **Citizenship Act, 1955** [1]. The law may be called the **Citizenship (Amendment) Act, 2019** [2]. It will become effective on a date that the Central Government announces by a notification in the Official Gazette [1][2][3].
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billPassedInBothHousesFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+[2] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billPassedInLSFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+[3] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billIntroducedFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+
+Q (exact): What is the Digital Personal Data Protection Bill 2023 about?
+------------------------------------------------------------------------
+The Digital Personal Data Protection Bill, 2023 is “to provide for the processing of digital personal data in a manner that recognises both the right of individuals to protect their personal data and the need to process such personal data for lawful purposes and for matters connected therewith or incidental thereto.” [2]
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Digital Personal Data Protection (Amendment) Bill, 2024 (Amendment of Section 9, etc.). - Bill 277 of 2024 | billIntroducedFile | Preamble | 1746_277_2024_The Digital Personal Data Protection (Amendment) Bill, 2024.pdf (official)
+[2] THE DIGITAL PERSONAL DATA PROTECTION BILL, 2023 - Bill 113 of 2023 | billPassedInBothHousesFile | 44. Amendments to certain Acts. | 3405_113_2023_THE DIGITAL PERSONAL DATA PROTECTION BILL, 2023.pdf (official)
+[3] THE DIGITAL PERSONAL DATA PROTECTION BILL, 2023 - Bill 113 of 2023 | billPassedInLSFile | 44. Amendments to certain Acts. | 3405_113_2023_THE DIGITAL PERSONAL DATA PROTECTION BILL, 2023.pdf (official)
+
+Q (explain): What is the Digital Personal Data Protection Bill 2023 about?
+------------------------------------------------------------------------
+The Digital Personal Data Protection Bill 2023 is a law that sets rules for handling digital personal data.  
+It aims to protect each person’s right to keep their data safe **and** to allow data to be used for lawful purposes and related matters. [2] [3]
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Digital Personal Data Protection (Amendment) Bill, 2024 (Amendment of Section 9, etc.). - Bill 277 of 2024 | billIntroducedFile | Preamble | 1746_277_2024_The Digital Personal Data Protection (Amendment) Bill, 2024.pdf (official)
+[2] THE DIGITAL PERSONAL DATA PROTECTION BILL, 2023 - Bill 113 of 2023 | billPassedInBothHousesFile | 44. Amendments to certain Acts. | 3405_113_2023_THE DIGITAL PERSONAL DATA PROTECTION BILL, 2023.pdf (official)
+[3] THE DIGITAL PERSONAL DATA PROTECTION BILL, 2023 - Bill 113 of 2023 | billPassedInLSFile | 44. Amendments to certain Acts. | 3405_113_2023_THE DIGITAL PERSONAL DATA PROTECTION BILL, 2023.pdf (official)
+
+Q (exact): What does the Bharatiya Nyaya Sanhita 2023 replace?
+------------------------------------------------------------------------
+The Bharatiya Nyaya Sanhita 2023 provides for the repeal of the Indian Penal Code, 1860. [2]
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] THE BHARATIYA NAGARIK SURAKSHA SANHITA, 2023 - Bill 174 of 2023 | billPassedInBothHousesFile | Preamble | 2576_174_2023_THE BHARATIYA NAGARIK SURAKSHA SANHITA, 2023.pdf (official)
+[2] THE BHARATIYA NYAYA SANHITA, 2023 - Bill 121 of 2023 | billIntroducedFile | Clause 356 of the Bill seeks to provide for repeal | 3272_121_2023_THE BHARATIYA NYAYA SANHITA, 2023.pdf (official)
+[3] THE BHARATIYA NYAYA  SANHITA, 2023 - Bill 173 of 2023 | billIntroducedFile | 5. Accordingly, a Bill, namely, the Bharatiya Nyay | 2584_173_2023_THE BHARATIYA NYAYA SANHITA, 2023.pdf (official)
+
+Q (explain): What does the Bharatiya Nyaya Sanhita 2023 replace?
+------------------------------------------------------------------------
+The Bharatiya Nyaya Sanhita 2023 repeals (removes) the Indian Penal Code of 1860, so it takes the place of that old law. [2]
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] THE BHARATIYA NAGARIK SURAKSHA SANHITA, 2023 - Bill 174 of 2023 | billPassedInBothHousesFile | Preamble | 2576_174_2023_THE BHARATIYA NAGARIK SURAKSHA SANHITA, 2023.pdf (official)
+[2] THE BHARATIYA NYAYA SANHITA, 2023 - Bill 121 of 2023 | billIntroducedFile | Clause 356 of the Bill seeks to provide for repeal | 3272_121_2023_THE BHARATIYA NYAYA SANHITA, 2023.pdf (official)
+[3] THE BHARATIYA NYAYA  SANHITA, 2023 - Bill 173 of 2023 | billIntroducedFile | 5. Accordingly, a Bill, namely, the Bharatiya Nyay | 2584_173_2023_THE BHARATIYA NYAYA SANHITA, 2023.pdf (official)
+
+Q (exact): Which communities are covered under the Citizenship Amendment Act 2019?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billIntroducedFile | 7. Many persons of Indian origin including persons | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+[2] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billPassedInLSFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+[3] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billIntroducedFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+
+Q (explain): Which communities are covered under the Citizenship Amendment Act 2019?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billIntroducedFile | 7. Many persons of Indian origin including persons | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+[2] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billPassedInLSFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+[3] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billIntroducedFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+
+Q (exact): What punishment does the Triple Talaq Act 2019 prescribe?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Muslim Women (Protection of Rights on Marriage) Bill, 2019 - Bill 82 of 2019 | billGazettedFile | 7. Notwithstanding anything contained in the Code  | 0348_82_2019_The Muslim Women (Protection of Rights on Marriage) Bill, 20.pdf (official)
+[2] The Muslim Women (Protection of Rights on Marriage) Bill, 2019 - Bill 82 of 2019 | billPassedInLSFile | 7. Notwithstanding anything contained in the Code  | 0348_82_2019_The Muslim Women (Protection of Rights on Marriage) Bill, 20.pdf (official)
+[3] The Muslim Women (Protection of Rights on Marriage) Bill, 2019 - Bill 82 of 2019 | billPassedInBothHousesFile | 7. Notwithstanding anything contained in the Code  | 0348_82_2019_The Muslim Women (Protection of Rights on Marriage) Bill, 20.pdf (official)
+
+Q (explain): What punishment does the Triple Talaq Act 2019 prescribe?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Muslim Women (Protection of Rights on Marriage) Bill, 2019 - Bill 82 of 2019 | billGazettedFile | 7. Notwithstanding anything contained in the Code  | 0348_82_2019_The Muslim Women (Protection of Rights on Marriage) Bill, 20.pdf (official)
+[2] The Muslim Women (Protection of Rights on Marriage) Bill, 2019 - Bill 82 of 2019 | billPassedInLSFile | 7. Notwithstanding anything contained in the Code  | 0348_82_2019_The Muslim Women (Protection of Rights on Marriage) Bill, 20.pdf (official)
+[3] The Muslim Women (Protection of Rights on Marriage) Bill, 2019 - Bill 82 of 2019 | billPassedInBothHousesFile | 7. Notwithstanding anything contained in the Code  | 0348_82_2019_The Muslim Women (Protection of Rights on Marriage) Bill, 20.pdf (official)
+
+Q (exact): What is the Income-tax Bill 2025 about?
+------------------------------------------------------------------------
+Clause 2 read with the First Schedule to the Bill, seeks to specify the rates at which income‑tax is to be levied on income chargeable to tax for the assessment year 2025‑2026. Further, it lays down the rates at which tax is to be deducted at source during the financial year under the Income‑tax Act; and the rates at which “advance tax” is to be paid, tax is to be deducted at source from, or paid on, income chargeable under the head “Salaries” or deducted under section 194P of the Income‑tax Act and tax is to be calculated and charged in special cases for the financial year 2025‑2026. [2]
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Finance Bill, 2026 - Bill 3 of 2026 | billIntroducedFile | Clause 3 read with the First Schedule to the Bill  | 1613_3_2026_The Finance Bill, 2026.pdf (official)
+[2] The Finance Bill, 2025 - Bill 14 of 2025 | billIntroducedFile | Clause 2 read with the First Schedule to the Bill, | 2999_14_2025_The Finance Bill, 2025.pdf (official)
+[3] THE FINANCE (NO. 2) BILL, 2024 - Bill 55 of 2024 | billIntroducedFile | Clause 2 read with the First Schedule to the Bill, | 0921_55_2024_THE FINANCE (NO. 2) BILL, 2024.pdf (official)
+
+Q (explain): What is the Income-tax Bill 2025 about?
+------------------------------------------------------------------------
+The Income‑tax Bill 2025 sets the tax rates for the assessment year 2025‑2026 [2].  
+It also tells the rates for tax deducted at source (TDS) that must be taken during that financial year [2].  
+The Bill fixes the rates for “advance tax”, which taxpayers pay in installments before filing returns [2].  
+It includes the TDS rates that apply to income from salaries and the rates under section 194P of the Income‑tax Act [2].  
+Finally, it provides rules for calculating tax in special cases for the 2025‑2026 financial year [2].
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Finance Bill, 2026 - Bill 3 of 2026 | billIntroducedFile | Clause 3 read with the First Schedule to the Bill  | 1613_3_2026_The Finance Bill, 2026.pdf (official)
+[2] The Finance Bill, 2025 - Bill 14 of 2025 | billIntroducedFile | Clause 2 read with the First Schedule to the Bill, | 2999_14_2025_The Finance Bill, 2025.pdf (official)
+[3] THE FINANCE (NO. 2) BILL, 2024 - Bill 55 of 2024 | billIntroducedFile | Clause 2 read with the First Schedule to the Bill, | 0921_55_2024_THE FINANCE (NO. 2) BILL, 2024.pdf (official)
+
+Q (exact): What does the Constitution (106th Amendment) Bill 2023 provide for women?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Protection  of Women from Domestic Violence (Amendment) Bill, 2022(Amendment of section 2, etc.) - Bill 88 of 2022 | billIntroducedFile | Preamble | 0237_88_2022_The Protection of Women from Domestic Violence (Amendment) B.pdf (official)
+[2] The Constitution (Amendment) Bill, 2018 (Amendment of article 75, etc.) - Bill 65 of 2018 | billIntroducedFile | Preamble | 0710_65_2018_The Constitution (Amendment) Bill, 2018 (Amendment of articl.pdf (official)
+[3] THE CONSTITUTION (ONE HUNDRED AND THIRTY-FIRST AMENDMENT) BILL, 2026 - Bill 107 of 2026 | billIntroducedFile | Preamble | 3523_107_2026_THE CONSTITUTION (ONE HUNDRED AND THIRTY-FIRST AMENDMENT) BI.pdf (official)
+
+Q (explain): What does the Constitution (106th Amendment) Bill 2023 provide for women?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Protection  of Women from Domestic Violence (Amendment) Bill, 2022(Amendment of section 2, etc.) - Bill 88 of 2022 | billIntroducedFile | Preamble | 0237_88_2022_The Protection of Women from Domestic Violence (Amendment) B.pdf (official)
+[2] The Constitution (Amendment) Bill, 2018 (Amendment of article 75, etc.) - Bill 65 of 2018 | billIntroducedFile | Preamble | 0710_65_2018_The Constitution (Amendment) Bill, 2018 (Amendment of articl.pdf (official)
+[3] THE CONSTITUTION (ONE HUNDRED AND THIRTY-FIRST AMENDMENT) BILL, 2026 - Bill 107 of 2026 | billIntroducedFile | Preamble | 3523_107_2026_THE CONSTITUTION (ONE HUNDRED AND THIRTY-FIRST AMENDMENT) BI.pdf (official)
+
+Q (exact): Which Acts did the Farm Laws Repeal Act 2021 repeal?
+------------------------------------------------------------------------
+The Farm Laws Repeal Act, 2021 repealed:
+
+- The Farmers (Empowerment and Protection) Agreement on Price Assurance and Farm Services Act, 2020【1】  
+- The Farmers’ Produce Trade and Commerce (Promotion and Facilitation) Act, 2020【1】  
+- The Essential Commodities (Amendment) Act, 2020【1】
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] THE FARM LAWS REPEAL BILL, 2021 - Bill 143 of 2021 | billGazettedFile | Preamble | 2939_143_2021_THE FARM LAWS REPEAL BILL, 2021.pdf (official)
+[2] THE FARM LAWS REPEAL BILL, 2021 - Bill 143 of 2021 | billPassedInBothHousesFile | Preamble | 2939_143_2021_THE FARM LAWS REPEAL BILL, 2021.pdf (official)
+[3] THE FARM LAWS REPEAL BILL, 2021 - Bill 143 of 2021 | billPassedInLSFile | Preamble | 2939_143_2021_THE FARM LAWS REPEAL BILL, 2021.pdf (official)
+
+Q (explain): Which Acts did the Farm Laws Repeal Act 2021 repeal?
+------------------------------------------------------------------------
+The Farm Laws Repeal Act 2021 got rid of three laws:
+
+- The Farmers (Empowerment and Protection) Agreement on Price Assurance and Farm Services Act, 2020【1】【3】.  
+- The Farmers’ Produce Trade and Commerce (Promotion and Facilitation) Act, 2020【1】【3】.  
+- The Essential Commodities (Amendment) Act, 2020【1】【3】.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] THE FARM LAWS REPEAL BILL, 2021 - Bill 143 of 2021 | billGazettedFile | Preamble | 2939_143_2021_THE FARM LAWS REPEAL BILL, 2021.pdf (official)
+[2] THE FARM LAWS REPEAL BILL, 2021 - Bill 143 of 2021 | billPassedInBothHousesFile | Preamble | 2939_143_2021_THE FARM LAWS REPEAL BILL, 2021.pdf (official)
+[3] THE FARM LAWS REPEAL BILL, 2021 - Bill 143 of 2021 | billPassedInLSFile | Preamble | 2939_143_2021_THE FARM LAWS REPEAL BILL, 2021.pdf (official)
+
+Q (exact): What did the Jammu and Kashmir Reorganisation Bill 2019 do?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] THE JAMMU AND KASHMIR REORGANISATION (SECOND AMENDMENT) BILL, 2023 - Bill 172 of 2023 | billPassedInBothHousesFile | Preamble | 2591_172_2023_THE JAMMU AND KASHMIR REORGANISATION (SECOND AMENDMENT) BILL.pdf (official)
+[2] THE JAMMU AND KASHMIR REORGANISATION (AMENDMENT) BILL, 2023 - Bill 100 of 2023 | billPassedInLSFile | Preamble | 3639_100_2023_THE JAMMU AND KASHMIR REORGANISATION (AMENDMENT) BILL, 2023.pdf (official)
+[3] THE JAMMU AND KASHMIR REORGANISATION (AMENDMENT) BILL, 2023 - Bill 100 of 2023 | billIntroducedFile | Preamble | 3639_100_2023_THE JAMMU AND KASHMIR REORGANISATION (AMENDMENT) BILL, 2023.pdf (official)
+
+Q (explain): What did the Jammu and Kashmir Reorganisation Bill 2019 do?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] THE JAMMU AND KASHMIR REORGANISATION (SECOND AMENDMENT) BILL, 2023 - Bill 172 of 2023 | billPassedInBothHousesFile | Preamble | 2591_172_2023_THE JAMMU AND KASHMIR REORGANISATION (SECOND AMENDMENT) BILL.pdf (official)
+[2] THE JAMMU AND KASHMIR REORGANISATION (AMENDMENT) BILL, 2023 - Bill 100 of 2023 | billPassedInLSFile | Preamble | 3639_100_2023_THE JAMMU AND KASHMIR REORGANISATION (AMENDMENT) BILL, 2023.pdf (official)
+[3] THE JAMMU AND KASHMIR REORGANISATION (AMENDMENT) BILL, 2023 - Bill 100 of 2023 | billIntroducedFile | Preamble | 3639_100_2023_THE JAMMU AND KASHMIR REORGANISATION (AMENDMENT) BILL, 2023.pdf (official)
+
+Q (exact): What did MPs say during the debate on the Citizenship Amendment Bill?
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] The Citizenship (Amendment) Bill, 2019 - Bill 370 of 2019 | billPassedInLSFile | Preamble | 1289_370_2019_The Citizenship (Amendment) Bill, 2019.pdf (official)
+[2] The Citizenship (Amendment) Bill, 2023 (Amendment of section 18) - Bill 36 of 2023 | billIntroducedFile | 2. In section 18 of the Citizenship Act, 1955, aft | 1340_36_2023_The Citizenship (Amendment) Bill, 2023 (Amendment of section.pdf (official)
+[3] The Citizenship (Amendment) Bill, 2014 - Bill 194 of 2014 | billIntroducedFile | Preamble | 2385_194_2014_The Citizenship (Amendment) Bill, 2014.pdf (official)
+REFUSAL CHECK: REFUSED-correctly
+
+Q (exact): Tell me about the Banking Companies Bill of 1995.
+------------------------------------------------------------------------
+The official bill text I have does not answer this.
+
+Sources (via groq:openai/gpt-oss-120b):
+[1] THE BANKING LAWS (AMENDMENT) BILL, 2024 - Bill 110 of 2024 | billPassedInBothHousesFile | Preamble | 3452_110_2024_THE BANKING LAWS (AMENDMENT) BILL, 2024.pdf (official)
+[2] The Banking Laws (Amendment) Bill, 2012 - Bill 18 of 2011 | billPassedInLSFile | Preamble | 2519_18_2011_The Banking Laws (Amendment) Bill, 2012.pdf (official)
+[3] THE BANKING LAWS (AMENDMENT) BILL, 2024 - Bill 110 of 2024 | billIntroducedFile | 19. In the Banking Companies (Acquisition and Tran | 3452_110_2024_THE BANKING LAWS (AMENDMENT) BILL, 2024.pdf (official)
+REFUSAL CHECK: REFUSED-correctly

@@ -1,0 +1,12 @@
+
+
+
+requests              # Step 1: download the official bill PDFs from Sansad
+tqdm                  # Step 1: progress bars on the long download
+pymupdf               # Step 2: read text out of the PDFs (mandatory)
+numpy                 # Step 3: the numbers behind the vectors
+sentence-transformers # Step 3: turn text into vectors (needs torch, above)
+chromadb              # Step 3: the vector database, stored on disk
+rank-bm25             # Step 3: plain keyword search, to sit beside the vectors
+flask                 # Step 5: the web chat backend (server.py)
+
