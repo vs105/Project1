@@ -60,6 +60,22 @@ RERANK_MODEL = "BAAI/bge-reranker-base"   # reads question + clause together
 RERANK_POOL = 20          # candidates re-scored (more = slower, slightly better)
 RERANK_TEXT = 400         # chars of a clause shown to the re-ranker
 
+# A bill's title page is not an answer to anything. It carries the title,
+# "AS PASSED BY THE HOUSES", the assent date, and nothing else. So a question
+# like "what is <the title> about" matches it perfectly - the question IS the
+# title - and it crowds out the Statement of Objects that actually explains the
+# bill. Asked about the Juvenile Justice Bill, 2015, the top-scoring chunk was
+# the assent line and the answer was procedural noise. These chunks are pushed
+# down, never dropped: for a handful of bills they are the only text there is.
+TITLE_PAGE_PENALTY = 0.35
+# "BE it enacted" is deliberately NOT in this list. The operative half of every
+# bill begins with the enacting formula, so matching it would demote clause 1 of
+# every bill ever written. These two phrases appear only on the title page of a
+# bill that has already been passed, which is exactly the page that carries no
+# information about what the bill does.
+TITLE_PAGE = re.compile(r"AS\s+PASSED\s+BY\s+THE\s+HOUSES|ASSENTED\s+TO\s+ON",
+                        re.IGNORECASE)
+
 # Why only 400 characters? Tested on the real clauses of Bill 82:
 #   probe "what punishment ...", clause text capped at 1200 -> clause 8 won
 #   probe "what punishment ...", clause text capped at  400 -> clause 4 won
@@ -332,6 +348,32 @@ class Brain:
             self._reranker = CrossEncoder(RERANK_MODEL, max_length=512)
         return self._reranker
 
+    def chunks_for(self, bill_no, year):
+        """
+        EVERY chunk this brain holds for one bill, in the order the bill is
+        written in.
+
+        search() answers "which clause matches this question". This answers
+        the other kind of question - "tell me about this bill" - where the
+        right move is to read the whole thing rather than the three clauses
+        that happened to score highest. The three best clauses of a
+        hundred-clause bill are not a summary of it, they are three clauses.
+
+        Returns [] when the bill has no readable text, which is also how a
+        scanned bill is detected without a second lookup.
+        """
+        no, yr = str(bill_no), str(year)
+        mine = [c for c in self.chunks.values()
+                if str(c.get("bill_no")) == no and str(c.get("year")) == yr]
+
+        def key(c):
+            n = c.get("clause_no") or ""
+            head = re.match(r"\d+", n)
+            return (0 if c.get("part") == "operative" else 1,
+                    int(head.group(0)) if head else 10 ** 6, n)
+
+        return sorted(mine, key=key)
+
     def year_in_brain(self, year):
         """Is this year inside the corpus at all? A 1995 question in a
         2004-2026 brain must not be answered by silently dropping the filter."""
@@ -418,7 +460,17 @@ class Brain:
         merged = {}
         for i in set(vec_scores) | set(key_scores):
             merged[i] = VEC_W * vec_scores.get(i, 0.0) + KEY_W * key_scores.get(i, 0.0)
-        ranked = sorted(merged, key=lambda i: -merged[i])
+
+        def rank_key(i):
+            # The score shown to the user stays the honest merged score; only
+            # the ORDER changes, so a title page can still win when it is the
+            # only thing the bill has.
+            s = merged[i]
+            if TITLE_PAGE.search(self.chunks[i]["text"][:300]):
+                s *= TITLE_PAGE_PENALTY
+            return s
+
+        ranked = sorted(merged, key=lambda i: -rank_key(i))
 
         # (d2) Re-rank. The merged score says how related a clause is to the
         # question. The re-ranker says whether it ANSWERS it. Those are

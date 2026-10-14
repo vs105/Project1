@@ -40,7 +40,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from bills_db import BillsDB, find_csv, norm_title, this_period
+from bills_db import BillsDB, find_csv, fmt, norm_title, this_period
 from step3_build_brain import Brain, MODEL_NAME, TOP_N, extract_filters, tokenize
 
 TIMEOUT = 60
@@ -413,6 +413,15 @@ def resolve_bill(db, plan, question, last_filters=None):
                 same = [b for b in hits
                         if re.search(r"\b%s\b" % re.escape(str(plan["year"])),
                                      b["title"] or "")]
+            if len(same) > 1:
+                # Same name, same year, both a Government bill and a Private
+                # Member's bill. The Government bill is the one that can become
+                # law, so it is the one the question is about - the same rule
+                # that orders every other disambiguation here.
+                gov = [b for b in same
+                       if str(b.get("type") or "").lower().startswith("gov")]
+                if len(gov) == 1:
+                    same = gov
             if len(same) == 1:
                 return {"kind": "one", "bill": same[0]}
             # Show the bills of the year that was asked about first, so the
@@ -449,14 +458,39 @@ def no_such_bill(name):
             "\"the Triple Talaq bill\".")
 
 
+def gov_first(bills):
+    """
+    Government bills before Private Member's.
+
+    Of the 3,678 bills in this corpus, 932 are Government bills and 2,746 are
+    Private Member's. Almost none of the latter ever become law. So when a name
+    is shared by both, the Government bill is what the question is about, and a
+    Private Member's bill is offered only when no Government bill of that name
+    matches at all.
+    """
+    def is_gov(b):
+        return str(b.get("type") or "").lower().startswith("gov")
+    return ([b for b in bills if is_gov(b)],
+            [b for b in bills if not is_gov(b)])
+
+
 def which_year(bills):
-    """Ask the user to pick, and list the real options."""
+    """Ask the user to pick, and list the real options, Government bills first."""
+    gov, pmb = gov_first(bills)
     lines = ["I found %d bills with that name, so I will not guess which one "
              "you mean. Which year?" % len(bills), ""]
-    for b in bills:
-        lines.append("- Bill No. %s of %s (%s, %s)"
-                     % (b["no"], b["year"], b["type"], b["status"]))
-    lines.append("")
+    for head, group in (
+            ("Government bills - these are the ones that become law:", gov),
+            ("Private Member's bills - proposals that rarely become law:", pmb)):
+        if not group:
+            continue
+        lines.append(head)
+        for b in group[:10]:
+            lines.append("  - Bill No. %s of %s (%s)"
+                         % (b["no"], b["year"], b["status"]))
+        if len(group) > 10:
+            lines.append("  - and %d more" % (len(group) - 10))
+        lines.append("")
     lines.append("Ask again with the year, for example \"... of 2019\".")
     return "\n".join(lines)
 
@@ -659,6 +693,11 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
     locked = res.get("bill")
     if locked:
         brain.last_filters = (locked["year"], locked["no"])
+    # Set when the bot had to choose between bills and chose one. It is put in
+    # front of the answer, because a silent choice is indistinguishable from a
+    # fact and the reader can never correct it.
+    pick_note = ""
+
     if res["kind"] == "many":
         # Asking "which year" is only useful when the answer would change what
         # we can say. Four bills are called "the Citizenship Amendment Bill",
@@ -670,11 +709,39 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
         # Bill 173 Passed and Bill 121 Withdrawn, which no year can tell apart
         # because both are 2023. The brain holds the text of one.
         have = brain_bills(brain)
-        answerable = [b for b in res["bills"]
+        gov, pmb = gov_first(res["bills"])
+        # Government bills always come first, and a Private Member's bill is
+        # only reached when no Government bill of that name can be answered.
+        pool, kind = gov, "Government"
+        answerable = [b for b in pool
                       if (str(b.get("no")), str(b.get("year"))) in have]
+        if not answerable and pmb:
+            pool, kind = pmb, "Private Member"
+            answerable = [b for b in pool
+                          if (str(b.get("no")), str(b.get("year"))) in have]
         if len(answerable) == 1:
+            # Several bills share the name and only one of them has text.
+            # Answering from it is the right call - refusing when we can be
+            # helpful is its own failure - but it IS a choice between real laws,
+            # and the reader must be able to see it and overrule it. So the
+            # answer opens by naming what was chosen and what was passed over.
             locked = answerable[0]
             brain.last_filters = (locked["year"], locked["no"])
+            others = sorted({b["year"] for b in pool if b is not locked})
+            note = ("Several bills share that name, so I am not guessing "
+                    "between them - I am telling you which one I used. I hold "
+                    "the text of Bill No. %s of %s, a %s bill, so this answer "
+                    "comes from that one."
+                    % (locked["no"], locked["year"], kind))
+            if others:
+                note += (" Other %s bills of the same name are from %s, and for "
+                         "those I hold the records but not the text."
+                         % (kind, ", ".join(others)))
+            if kind == "Private Member":
+                note += (" No Government bill of that name has text I can read, "
+                         "so this is the closest I hold - and a Private Member's "
+                         "Bill is a proposal, not law.")
+            pick_note = note + " Say the year if you meant a different one."
         elif not answerable:
             # Not one of them can be answered, so the year does not matter.
             return ("Several bills share that name, and I hold the text of none "
@@ -683,6 +750,24 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
                     [], "no-such-bill")
         else:
             return which_year(res["bills"]), [], "which-year"
+
+    # A Private Member's Bill is a proposal, not law, and nothing in its text
+    # says so. The note is set whenever the bill actually used is a Private
+    # Member's one - not only when it was chosen over Government bills -
+    # because "the Juvenile Justice Bill of 2025" resolves straight to a PMB
+    # and used to say nothing about it at all.
+    if (locked and not pick_note
+            and str(locked.get("type") or "").lower().startswith("priv")):
+        if locked.get("assent") or locked.get("act_no"):
+            pick_note = ("Bill No. %s of %s is a Private Member's Bill, but it "
+                         "was passed and assented, so this is law."
+                         % (locked["no"], locked["year"]))
+        else:
+            pick_note = ("Bill No. %s of %s is a Private Member's Bill - a "
+                         "proposal, not law. Its status is %s and it has not "
+                         "been passed, so no Act came from it."
+                         % (locked["no"], locked["year"],
+                            locked.get("status") or "pending"))
 
     # 4. Metadata questions go to the bill table. Exact, free, no LLM.
     if plan["intent"] == "metadata" and not plan["full_text"]:
@@ -706,6 +791,14 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
             and not re.search(r"\b(clause|section)\s+\d+", question,
                               re.IGNORECASE)):
         part = "narrative"
+    # Does this question want the WHOLE bill, or one clause of it? "Tell me
+    # about the JJ Bill" wants everything; "what punishment does clause 5
+    # prescribe" wants one clause. Reading the whole bill for the second is not
+    # thoroughness, it is noise - the answer gets chosen from two hundred
+    # clauses instead of the one that matters. The routing above has already
+    # sent overview questions to the narrative half, so that is the signal.
+    whole_bill = bool(locked and (part == "narrative" or plan["full_text"]))
+
     if part == "narrative" and not locked:
         # "Tell me about X" wants the bill's own Objects and Reasons, but that
         # is only a safe preference once we know which bill we are in. Search
@@ -731,8 +824,11 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
         filt = (locked["year"], locked["no"])
     hits = brain.search(search_q, top_n=top_n, part=part, filters=filt)
     if locked and not hits:
-        # the resolved bill has no readable text in the brain
-        return scanned_bill_reply(locked), [], "scanned-bill"
+        # the resolved bill has no readable text in the brain. The pick note
+        # still belongs here: a Private Member's Bill with no readable text is
+        # exactly the one a reader would otherwise take for law.
+        return ((pick_note + "\n\n" + scanned_bill_reply(locked)) if pick_note
+                else scanned_bill_reply(locked)), [], "scanned-bill"
     if not hits:
         hits = brain.search(search_q, top_n=top_n, filters=filt)
     if not hits:
@@ -799,14 +895,60 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
     # With a working key, the model writes the answer. Without one, the
     # explainer below writes it from the clauses already retrieved. Either way
     # the user gets sentences, never a dump of quoted text.
+    digest = None
+    if whole_bill:
+        # Read the whole bill rather than the three best-matching clauses.
+        digest = bill_digest(brain, locked, question, wants)
+
     if no_llm:
-        return plain_answer(hits, wants, question), hits, "none"
+        if digest:
+            # Cite the documents the briefing actually read. The answer quotes
+            # the gazette version; the sources used to list the top three of a
+            # keyword search, one of which was the introduced file - a
+            # different document, so no reader could have checked a word.
+            shown = [{"score": 1.0, "chunk": c} for c in digest["sources"]]
+            return (pick_note + "\n\n" + bill_briefing(digest, locked)
+                    if pick_note else bill_briefing(digest, locked),
+                    shown, "none")
+        # No model, so the answer is composed rather than written. A question
+        # about what a bill IS deserves the whole bill, not the half the
+        # question happened to be routed to: "what is the Bharatiya Nyaya
+        # Sanhita about" reads the preamble, and without the clauses too it can
+        # only ever quote that. So when the question is an overview one (the
+        # part was switched to narrative), pull the clauses as well.
+        more = []
+        if locked and part == "narrative":
+            try:
+                more = brain.search(search_q, top_n=3, part="operative",
+                                    filters=filt)
+            except Exception:
+                more = []
+        out = plain_answer(hits, wants, question, more)
+        return ((pick_note + "\n\n" + out) if pick_note else out,
+                hits + more, "none")
     if mock_llm:
-        return plain_answer(hits, wants, question), hits, "mock"
+        out = plain_answer(hits, wants, question)
+        return ((pick_note + "\n\n" + out) if pick_note else out, hits, "mock")
+    writer_hits = hits
+    if digest:
+        # Same whole bill, handed to the model instead of the top three
+        # clauses. Capped because a hundred-clause bill is far more tokens than
+        # one request should carry; the digest already holds the structure, so
+        # what is sent here is the text the model will actually quote.
+        pool = digest["chunks"]
+        keep = [c for c, _ in digest["asked"]]
+        for c in pool:
+            if len(keep) >= 40:
+                break
+            if not any(c is k for k in keep):
+                keep.append(c)
+        writer_hits = [{"score": 1.0, "chunk": c} for c in keep]
     try:
-        text, used = groq_chat(build_writer_messages(question, hits, plan, mode),
+        text, used = groq_chat(build_writer_messages(question, writer_hits,
+                                                     plan, mode),
                                api_key, llm_models or LLM_MODELS)
-        return text, hits, used
+        return ((pick_note + "\n\n" + text) if pick_note else text,
+                writer_hits, used)
     except AuthError as e:
         # A missing or rejected key must not mean a blank screen or a dump of
         # quotes. Say which of the two it is, because the fix is different.
@@ -858,12 +1000,68 @@ BOILERPLATE = [
     r"for the purposes of this Act",
     r"Without prejudice to the generality of the provisions of this Act",
     # The year belongs to the Act being cited, so take it with the citation.
-    r"Notwithstanding anything contained in [^,]{0,90},\s*\d{4}\s*,?",
+    # The year is optional: "Notwithstanding anything contained in the Code of
+    # Criminal Procedure, any child who has completed sixteen years..." is the
+    # same opener with no citation at all, and leaving it in made a clause
+    # about children read like a clause about procedure.
+    r"Notwithstanding anything contained in [^,]{0,90},\s*(?:\d{4}\s*,?)?",
 ]
 
 # What a clause can start with once the boilerplate is gone: a leftover year, a
 # stray dash, a clause letter. None of it is an answer.
 LEADING_JUNK = r"^[\d\s,;:.\-]*\(?[a-z]\)?[\s,;:.\-]*"
+
+# Section furniture. In the bill these words sit on a line of their own; PDF
+# extraction glues them onto whatever sentence follows, so they have to come
+# off a SENTENCE and not only off the start of a chunk. A reader shown
+# "STATEMENT OF OBJECTS AND REASONS The bill was enacted to..." is being shown
+# the bill's filing system instead of its reason.
+# Every word is separated by \s+ rather than a single space because PDF
+# extraction leaves double spaces in headings as often as single ones - the
+# Bharatiya Nyaya Sanhita's Statement of Objects is spelled "STATEMENT  OF
+# OBJECTS  AND  REASONS" and a plain-space pattern never finds it.
+HEAD_WORDS = (
+    r"STATEMENT\s+OF\s+OBJECTS\s+AND\s+REASONS",
+    r"NOTES\s+ON\s+CLAUSES",
+    r"FINANCIAL\s+MEMORANDUM",
+    r"MEMORANDUM\s+REGARDING\s+DELEGATED\s+LEGISLATION",
+    r"ARRANGEMENT\s+OF\s+CLAUSES",
+    r"THE\s+GAZETTE\s+OF\s+INDIA(?:\s*EXTRAORDINARY)?"
+    r"(?:\s*\[?\s*PART\s+[IVXLC]+[^\]]{0,30}\]?)?",
+    r"PUBLISHED\s+BY\s+AUTHORITY",
+    r"AS\s+PASSED\s+BY\s+THE\s+(?:HOUSES\s+OF\s+PARLIAMENT|LOK\s+SABHA"
+    r"|RAJYA\s+SABHA)",
+)
+
+SOO = r"STATEMENT\s+OF\s+OBJECTS\s+AND\s+REASONS"
+NOTES = r"NOTES\s+ON\s+CLAUSES"
+
+
+def cut_at_heading(s):
+    """
+    Truncate at the first section heading.
+
+    A long title is quoted with a 420-character window so that a title broken
+    across a page still comes out whole, and that window runs straight on into
+    the next section: the Bharatiya Nyaya Sanhita was being described as
+    "...incidental thereto. STATEMENT OF OBJECTS AND REASONS In the year 1834,
+    the first Indian Law Commission...". A heading follows a full stop, so the
+    cut is made there and the full stop is kept.
+    """
+    m = re.search(r"[.;]\s*(?:%s)" % "|".join(HEAD_WORDS), s, re.IGNORECASE)
+    return s[:m.start() + 1] if m else s
+
+
+def strip_headings(s):
+    """Take section furniture off the front of a sentence, however many
+    headings the extractor glued together."""
+    for _ in range(4):
+        new = re.sub(r"^\s*(?:%s)\s*[:\-\u2014\u2013]*\s*" % "|".join(HEAD_WORDS),
+                     " ", s, flags=re.IGNORECASE)
+        if new == s:
+            break
+        s = new
+    return s
 
 # How to open an answer for each kind of question. The sentence that follows
 # comes from the bill itself, so the frame is the only thing written here.
@@ -882,6 +1080,7 @@ def plain_sentence(text):
     for pat in BOILERPLATE:
         s = re.sub(pat, " ", s, flags=re.IGNORECASE)
     s = re.sub(r"^\s*\d+[A-Z]?\.\s*", "", s)          # leading clause number
+    s = strip_headings(s)
     s = re.sub(LEADING_JUNK, "", s)
     s = re.sub(r"\s+", " ", s).strip(" ,;:")
     # "shall be punished" reads as an answer, "shall be liable to" does not.
@@ -889,6 +1088,39 @@ def plain_sentence(text):
     s = s.replace("shall be", "is").replace("shall also", "is also")
     s = re.sub(r"\s+", " ", s).strip(" ,;:")
     return s
+
+
+def reason_sentence(text, qwords=()):
+    """
+    The sentence in a Statement of Objects that says why the bill was brought.
+
+    The Statement is a short numbered argument: what the law was, what was
+    wrong with it, what the Government decided. The sentence carrying the
+    decision is the answer, and it is a long one - so candidates are filtered
+    for length FIRST and scored after. Scoring first picked the Sanhita's
+    closing line, "The Bill seeks to achieve the above objectives.", because it
+    contains the words "the Bill seeks"; that line was then thrown away for
+    being under ninety characters and the answer fell through to a different
+    section of the bill altogether.
+    """
+    sents = [x for x in re.split(r"(?<=[.;])\s+", text) if len(x) > 25]
+    pool = [x for x in sents if len(x) >= 90] or sents
+    best, top = None, -1
+    for sent in pool:
+        low = sent.lower()
+        score = 0
+        for w in ("expedient", "necessary", "proposed to enact", "it is proposed",
+                  "in order to", "with a view to", "the government",
+                  "considered", "object of the bill"):
+            if w in low:
+                score += 3
+        # A paragraph that only restates the bill's own name says nothing.
+        if re.search(r"seeks to achieve the above", low):
+            score -= 6
+        score += 5 * sum(1 for w in qwords if w in low)
+        if score > top:
+            best, top = sent, score
+    return plain_sentence(best or (pool[0] if pool else text))
 
 
 def answer_sentence(text, wants, qwords):
@@ -909,37 +1141,442 @@ def answer_sentence(text, wants, qwords):
     return plain_sentence(best or sents[0])
 
 
-def plain_answer(hits, wants, question):
+# A bill is published as up to eight SEPARATE documents: the draft as
+# introduced, the version passed in each House, the version passed in both,
+# the gazette, the synopsis, the committee report. They are not the same text.
+# A clause can be amended, renumbered or deleted between the draft and the
+# gazette, so quoting the draft and calling it "what the bill prescribes" is
+# quoting a provision that may never have become law.
+#
+# So every piece of text this assistant quotes says which document it came
+# from, and where a clause exists in more than one, the enacted version wins.
+SLOT_LABEL = {
+    "billGazettedFile": "the gazette version",
+    "billPassedInBothHousesFile": "as passed by both Houses",
+    "billPassedInLSFile": "as passed by the Lok Sabha",
+    "billPassedInRSFile": "as passed by the Rajya Sabha",
+    "billIntroducedFile": "as introduced",
+    "billSynopsisFile": "the synopsis",
+    "reportFile": "the committee report",
+    "errataFile": "the errata sheet",
+}
+
+# Lower is more authoritative. The gazette is the law as enacted; the introduced
+# file is a draft that was later changed. A clause that exists only in the
+# draft is still shown - labelled as the draft - because refusing to answer is
+# worse than answering with the version we hold.
+SLOT_RANK = {
+    "billGazettedFile": 0,
+    "billPassedInBothHousesFile": 1,
+    "billPassedInLSFile": 2,
+    "billPassedInRSFile": 3,
+    "billIntroducedFile": 4,
+    "billSynopsisFile": 5,
+    "reportFile": 6,
+    "errataFile": 7,
+}
+
+
+def source_of(chunk):
+    """Name the document a piece of text came from, for the reader."""
+    slot = chunk.get("slot") or ""
+    return SLOT_LABEL.get(slot, slot or "the bill text")
+
+
+def bill_digest(brain, bill, question, wants):
     """
-    Write an answer in plain sentences using only the clauses already
-    retrieved. No model, no network, no invented facts. This is what the
-    assistant says when no API key is available, and it is the difference
-    between answering and dumping.
+    Read EVERY chunk this brain holds for one bill, and distil it.
+
+    Top-K search answers "which clause matches this question". This answers
+    "tell me about this bill", where the honest move is to read the whole
+    thing. The digest is the bill's own structure: what it says it is, why it
+    was brought, what it covers, and what it prescribes on the thing that was
+    actually asked.
+
+    It is built once and used twice - formatted for the reader when there is
+    no model, and handed to the model when there is one - so both paths answer
+    from the same whole bill rather than the same three clauses.
     """
-    h = hits[0]
-    c = h["chunk"]
-    clause = c.get("clause_no") or ""
+    mine = brain.chunks_for(bill["no"], bill["year"])
+    if not mine:
+        return None
     qwords = {w for w in re.findall(r"[a-z]{4,}", question.lower())
               if w not in QUESTION_WORDS}
+    # The bill's own name must not count as a topical match. "What is the
+    # Juvenile Justice Bill about" shares juvenile and justice with half the
+    # clauses in it, so without this the answer's clause list is chosen by the
+    # title rather than by what was asked. The bill is already identified, so
+    # its name tells us nothing about which clause matters.
+    qwords -= set(norm_title(bill["title"]).split())
+
+    # 1. What the bill is: its own long title. Every Indian bill opens with
+    #    "A BILL to ..." and that sentence is the bill describing itself.
+    purpose, purpose_src, purpose_c = "", "", None
+    # The long title is quoted from the most authoritative document we hold.
+    # The versions differ, and the enacted one is the one that counts - the
+    # Juvenile Justice Bill was describing itself from the Lok Sabha version
+    # while the gazette sat in the same brain.
+    titled = sorted((c for c in mine
+                     if re.search(r"\bA\s+BILL\s+to\b", c["text"], re.IGNORECASE)),
+                    key=lambda c: SLOT_RANK.get(c.get("slot"), 9))
+    for c in titled:
+        m = re.search(r"\bA\s+BILL\s+to\b.{0,420}", c["text"],
+                      re.IGNORECASE | re.DOTALL)
+        if m:
+            purpose = plain_sentence(cut_at_heading(m.group(0)))
+            if len(purpose) > 420:
+                purpose = purpose[:420].rsplit(" ", 1)[0]
+            purpose_src, purpose_c = source_of(c), c
+            break
+
+    # 2. Why it exists: the Statement of Objects and Reasons, in the bill's own
+    #    words. That section is the bill explaining itself, so it is looked for
+    #    BY NAME before anything else is considered.
+    #
+    #    Without that, an overview question was answered out of NOTES ON
+    #    CLAUSES, which is the reason for ONE clause: "why was the Bharatiya
+    #    Nyaya Sanhita brought?" came back "Liability of abettor for an effect
+    #    caused by the act abetted different from that intended...". Notes on
+    #    Clauses is still read, but only when the Statement is not held.
+    why, why_src, why_c = "", "", None
+    for head in (SOO, NOTES):
+        # Same preference: the enacted document's own words first.
+        pool = sorted((c for c in mine if c.get("part") == "narrative"
+                       and re.search(head, c["text"], re.IGNORECASE)),
+                      key=lambda c: SLOT_RANK.get(c.get("slot"), 9))
+        for c in pool:
+            body = re.sub(r"^.*?" + head + r"\s*", "", c["text"],
+                          flags=re.IGNORECASE | re.DOTALL)
+            cand = reason_sentence(body, qwords)
+            # "Clause 63 of the Bill seeks to..." explains ONE clause. On a
+            # question about the whole bill that is not the reason the bill was
+            # brought, so it is refused rather than mislabelled - the Digital
+            # Personal Data Protection Bill was being introduced with the
+            # duties of a Data Principal as its reason for existing.
+            if re.match(r"\s*(?:this\s+)?clause\b", cand, re.IGNORECASE):
+                continue
+            if len(cand) > 90 and cand[:70] not in purpose[:220]:
+                why, why_src, why_c = cand, source_of(c), c
+                break
+        if why:
+            break
+
+    # 3. What it covers: the chapters and the clauses inside each. This is the
+    #    skeleton of the whole law and it costs a dozen lines, so a reader can
+    #    see the scope of a hundred-clause bill without reading a hundred
+    #    clauses.
+    #    Read the skeleton from ONE version of the bill, never merged across
+    #    versions. A bill is published as several documents and the same clause
+    #    is numbered differently in the draft and in the Act, so taking the
+    #    lowest and highest number seen for a chapter across every version we
+    #    hold produced a skeleton that ran backwards and overlapped:
+    #    "CHAPTER II: clauses 3-10" followed by "CHAPTER III: clauses 5-9", and
+    #    for the Finance (No. 2) Bill 2024 a "CHAPTER VI: clauses 1-168" that
+    #    was simply the whole bill. One document is internally consistent; four
+    #    merged are not. The version we hold most completely is the one to
+    #    read, and a tie goes to the more authoritative document.
+    op = [c for c in mine
+          if c.get("part") == "operative"
+          and re.match(r"\d+", c.get("clause_no") or "")]
+    per_slot = {}
+    for c in op:
+        per_slot.setdefault(SLOT_RANK.get(c.get("slot"), 9), []).append(c)
+    spine_slot = (min(per_slot, key=lambda x: (-len(per_slot[x]), x))
+                  if per_slot else None)
+    spine = per_slot.get(spine_slot, []) if spine_slot is not None else []
+    # Which document the skeleton was read from. A bill's chapters are numbered
+    # differently between the draft and the Act, so a skeleton quoted without
+    # its version is a claim the reader cannot check.
+    spine_src = source_of(spine[0]) if spine else ""
+    terms, seen = [], {}
+    for c in spine:
+        num = int(re.match(r"\d+", c["clause_no"]).group(0))
+        # "CHAPTER  IV" with two spaces is the PDF's spacing, not the chapter's
+        # name, and it reads like a typo in the answer.
+        t = re.sub(r"\s+", " ", c.get("term") or "").strip()
+        if t not in seen:
+            seen[t] = [num, num, t]
+            terms.append(seen[t])
+        else:
+            seen[t][0] = min(seen[t][0], num)
+            seen[t][1] = max(seen[t][1], num)
+    # A skeleton is only worth printing if the chapter labels hold together:
+    # each chapter's clauses must begin after the previous chapter's clauses
+    # ended. When they do not, the labels are wrong for this document - the
+    # arrangement-of-clauses list at the front of a bill is set in the same
+    # typeface as its chapters, so its headings get attached to clause 1, and
+    # the Juvenile Justice Bill came back "CHAPTER II: clauses 3-10" followed
+    # by "CHAPTER III: clauses 5-9". A skeleton that runs backwards is worse
+    # than no skeleton, so the bill is then described by its span instead.
+    clean = []
+    for lo, hi, t in terms:
+        if clean and lo <= clean[-1][1]:
+            clean = None
+            break
+        clean.append([lo, hi, t])
+    terms = clean or []
+
+    # 4. What it prescribes on the thing that was asked. One version of each
+    #    clause, the most authoritative document we hold, and only clauses that
+    #    carry a word the question used - so the whole bill is read but the
+    #    answer is still about what was asked.
+    best = {}
+    for c in mine:
+        if c.get("part") != "operative" or not c.get("clause_no"):
+            continue
+        rank = SLOT_RANK.get(c.get("slot"), 9)
+        cur = best.get(c["clause_no"])
+        if cur is None or rank < cur[0]:
+            best[c["clause_no"]] = (rank, c)
+    asked = []
+    for rank, c in sorted(best.values(), key=lambda rc: rc[0]):
+        low = c["text"].lower()
+        # Clause 1 of every Indian Act is the short title, and it repeats the
+        # bill's whole name - so on a "what is X about" question it out-matches
+        # every real clause. It is the same trap as the title page.
+        if re.search(r"\bmay be called\b|\bshort title\b", low):
+            continue
+        hits_words = sum(1 for w in qwords if w in low)
+        grounds = any(w in low for w in GROUNDING.get(wants, ()))
+        if not (grounds or hits_words >= 1):
+            continue
+        sent = answer_sentence(c["text"], wants, qwords)
+        if len(sent) > 60:
+            asked.append((c, sent))
+        if len(asked) == 3:
+            break
+
+    # How much of the bill this is. The count is of DISTINCT clauses, not of
+    # chunks: a clause published as the draft, the Lok Sabha version and the
+    # gazette is one clause held three times, and counting chunks reported
+    # "I hold 245 clauses" for a bill with 112.
+    held = {c["clause_no"] for c in op}
+    nums = {int(re.match(r"\d+", n).group(0)) for n in held}
+
+    # Every clause the skeleton does not account for is named rather than left
+    # as a silent gap. Three chapters of the Juvenile Justice Act were coming
+    # back one clause short - Chapter III as "clauses 5-9" when the Act puts
+    # sections 4 to 9 there, Chapter VIII as 57-73 when it is 56 to 73 - and
+    # nothing on screen said so, so the map read as complete when it was not.
+    covered = set()
+    for lo, hi, _ in terms:
+        covered.update(range(lo, hi + 1))
+    gaps = (sorted(n for n in nums if n not in covered) if terms else [])
+
+    # The documents this briefing actually read, so the source list can cite
+    # them. Citing the top three of a keyword search instead showed a chunk
+    # from the introduced file while the answer quoted the gazette, and no
+    # reader could have checked a word of it.
+    srcs = []
+    for c in [purpose_c, why_c] + [x[0] for x in asked]:
+        if c is not None and not any(c is u for u in srcs):
+            srcs.append(c)
+    if not srcs:
+        srcs = (op or mine)[:3]
+
+    return {"purpose": purpose, "purpose_src": purpose_src,
+            "why": why, "why_src": why_src, "terms": terms, "asked": asked,
+            "n_clauses": len(held), "top_clause": max(nums) if nums else 0,
+            "slots": sorted({c.get("slot") for c in mine if c.get("slot")},
+                            key=lambda x: SLOT_RANK.get(x, 9)),
+            "sources": srcs, "spine_src": spine_src, "gaps": gaps,
+            "chunks": mine}
+
+
+def bill_briefing(d, bill):
+    """
+    Format a whole-bill digest as an answer a person can read.
+
+    It says what the bill is, why it exists, what it covers, and what it
+    prescribes on the question - and it says which document each of those came
+    from, because a bill is published several times and the versions differ.
+    """
+    out = [bill["title"], ""]
+    line = "Bill %s of %s" % (bill["no"], bill["year"])
+    if bill.get("ministry"):
+        line += "  -  " + bill["ministry"]
+    out.append(line)
+
+    dates = [("%s %s" % (lbl, fmt(bill.get(k))))
+             for lbl, k in (("introduced", "intro"), ("passed LS", "ls"),
+                            ("passed RS", "rs"), ("assented", "assent"))
+             if bill.get(k)]
+    if bill.get("act_no"):
+        dates.append("Act %s of %s" % (bill["act_no"], bill.get("act_year") or ""))
+    if dates:
+        out.append("  ".join(dates))
+
+    if d["purpose"]:
+        out.append("")
+        out.append("What it is: %s (%s)" % (d["purpose"], d["purpose_src"]))
+    if d["why"]:
+        out.append("")
+        out.append("Why it was brought: %s (%s)" % (d["why"], d["why_src"]))
+    if d["terms"]:
+        out.append("")
+        out.append("What it covers%s:" % ((" (from the %s)" % d["spine_src"])
+                                           if d.get("spine_src") else ""))
+        for lo, hi, t in d["terms"]:
+            name = t if t else "the main provisions"
+            rng = ("clauses %d-%d" % (lo, hi)) if lo != hi else ("clause %d" % lo)
+            out.append("  - %s: %s" % (name, rng))
+        if d["gaps"]:
+            few = d["gaps"][:8]
+            out.append("  (held but under no chapter heading in this text: "
+                       + ("clause %s" if len(few) == 1 else "clauses %s")
+                       % ", ".join(str(n) for n in few)
+                       + ("" if len(d["gaps"]) <= len(few)
+                          else " and %d more" % (len(d["gaps"]) - len(few)))
+                       + ")")
+    elif d["top_clause"]:
+        # The chapter labels for this document do not hold together, so the
+        # bill is described by its span rather than by chapters we cannot
+        # vouch for.
+        out.append("")
+        out.append("What it covers:")
+        out.append("  - the main provisions: clauses 1-%d" % d["top_clause"])
+    if d["asked"]:
+        out.append("")
+        out.append("On what you asked:")
+        for c, sent in d["asked"]:
+            out.append("  - Clause %s: %s (%s)"
+                       % (c["clause_no"], sent, source_of(c)))
+
+    # Coverage, said plainly. A bill published in eight documents may reach us
+    # as one of them, and the reader deserves to know which.
+    out.append("")
+    cov = "I hold %d clauses of this bill" % d["n_clauses"]
+    if d["top_clause"] and d["n_clauses"] < d["top_clause"]:
+        cov += (" (the text runs to clause %d, so some is missing)"
+                % d["top_clause"])
+    cov += ", from " + ", ".join(source_of({"slot": x}) for x in d["slots"]) + "."
+    out.append(cov)
+    return "\n".join(out)
+
+
+def plain_answer(hits, wants, question, extra=()):
+    """
+    Compose an answer out of the bill's own words. No model, no network, and
+    nothing invented.
+
+    With no language model there is no way to WRITE a sentence, only to choose
+    and order the ones the bill already contains. So the answer is built in the
+    shape a person expects - what the bill is, why it exists, what it
+    prescribes - and each part is taken from the part of the bill that actually
+    says it. The caller passes the operative clauses in `extra`, because the
+    preamble answers "what is this" and the clauses answer "what does it do",
+    and one question usually deserves both.
+
+    It is still the bill's words. It is no longer one clause with a label
+    stapled to the front of it.
+    """
+    pool = list(hits)
+    for h in extra:
+        if not any(h["chunk"] is x["chunk"] for x in pool):
+            pool.append(h)
+    if not pool:
+        return REFUSAL
+
+    c0 = pool[0]["chunk"]
+    bill = "Bill %s of %s" % (c0.get("bill_no"), c0.get("year"))
+    ministry = (c0.get("ministry") or "").strip()
+    title = (c0.get("bill_title") or "").strip()
+    qwords = {w for w in re.findall(r"[a-z]{4,}", question.lower())
+              if w not in QUESTION_WORDS}
+
+    # 1. What the bill is: its own long title. Every Indian bill opens with
+    #    "A BILL to ..." and that single sentence is the bill describing
+    #    itself, which is exactly what "what is this about" asks for.
+    purpose, purpose_src = "", ""
+    for h in pool:
+        m = re.search(r"\bA\s+BILL\s+to\b.{0,420}", h["chunk"]["text"],
+                      re.IGNORECASE | re.DOTALL)
+        if m:
+            purpose = plain_sentence(cut_at_heading(m.group(0)))
+            if len(purpose) > 420:
+                purpose = purpose[:420].rsplit(" ", 1)[0]
+            purpose_src = source_of(h["chunk"])
+            break
+
+    # 2. Why it exists: the Statement of Objects and Reasons. Skipped when it
+    #    is the very chunk the long title came from, so the same words are
+    #    never printed twice under two headings.
+    why, why_src = "", ""
+    # The same rule as the whole-bill digest uses: the bill's own Statement of
+    # Objects by name first, Notes on Clauses only if that is not held, and
+    # never a note that explains one clause. A narrow question gets the same
+    # "why" an overview question gets, or none.
+    for head in (SOO, NOTES):
+        for h in pool:
+            c = h["chunk"]
+            if c.get("part") != "narrative":
+                continue
+            if not re.search(head, c["text"], re.IGNORECASE):
+                continue
+            body = re.sub(r"^.*?" + head + r"\s*", "", c["text"],
+                          flags=re.IGNORECASE | re.DOTALL)
+            cand = reason_sentence(body, qwords)
+            if re.match(r"\s*(?:this\s+)?clause\b", cand, re.IGNORECASE):
+                continue
+            if len(cand) > 90 and cand[:70] not in purpose[:220]:
+                why, why_src = cand, source_of(c)
+                break
+        if why:
+            break
+
+    # 3. What it prescribes: one version of each clause, the most authoritative
+    #    one we hold, and only clauses that carry a word the question actually
+    #    used - so a clause is never quoted merely for being clause 2. A clause
+    #    that shares nothing is kept as a spare rather than thrown away, because
+    #    a vague question still deserves an answer.
+    best = {}
+    for h in pool:
+        c = h["chunk"]
+        if c.get("part") != "operative" or not c.get("clause_no"):
+            continue
+        rank = SLOT_RANK.get(c.get("slot"), 9)
+        cur = best.get(c["clause_no"])
+        if cur is None or rank < cur[0]:
+            best[c["clause_no"]] = (rank, h)
+    good, spare = [], []
+    for rank, h in sorted(best.values(), key=lambda rh: rh[0]):
+        c = h["chunk"]
+        sent = answer_sentence(c["text"], wants, qwords)
+        if len(sent) <= 60 or any(sent[:60] in g for g in good):
+            continue
+        low = c["text"].lower()
+        strong = (any(w in low for w in GROUNDING.get(wants, ()))
+                  or any(w in low for w in qwords))
+        line = "Clause %s %s (%s)" % (c["clause_no"], sent, source_of(c))
+        (good if strong else spare).append(line)
+        if len(good) == 2:
+            break
+    prescribes = good or spare[:1]
+
+    body = []
+    if purpose:
+        body.append("What it is: %s (%s)" % (purpose, purpose_src))
+    if why:
+        body.append("Why it was brought: %s (%s)" % (why, why_src))
+    if prescribes:
+        body.append("What it prescribes:\n"
+                    + "\n".join("  - " + x for x in prescribes))
+
+    head = title if title else ""
+    tail = "%s%s" % (bill, ", " + ministry if ministry else "")
+    if body:
+        return (head + "\n" if head else "") + tail + "\n\n" + "\n\n".join(body)
+
+    # Nothing composed: a bill whose text is all operative, or a question the
+    # composer found no shape for. Fall back to the best single sentence
+    # rather than say nothing at all.
+    c = pool[0]["chunk"]
+    clause = c.get("clause_no") or ""
     sent = answer_sentence(c["text"], wants, qwords)
     frame = FRAMES.get(wants, FRAMES["provisions"]) % (clause or "n/a")
-    bill = "Bill %s of %s" % (c.get("bill_no"), c.get("year"))
     if not clause:
         frame = "The bill's own background note says this."
-    out = "%s %s" % (frame, sent)
-    if len(hits) > 1:
-        nxt = hits[1]["chunk"]
-        if (nxt.get("clause_no") and nxt["clause_no"] != clause
-                and nxt.get("part") == "operative"):
-            extra = answer_sentence(nxt["text"], wants, qwords)
-            # A marginal note or a cross-reference is not worth a second
-            # sentence, and a wrong second sentence is worse than none.
-            if (len(extra) > 60 and "etc." not in extra
-                    and extra[:40] not in sent
-                    and any(w in nxt["text"].lower()
-                            for w in GROUNDING.get(wants, ()))):
-                out += " Clause %s adds: %s" % (nxt["clause_no"], extra)
-    return out + " (%s.)" % bill
+    return "%s %s (%s.)" % (frame, sent, bill)
 
 
 def chunks_only(hits):

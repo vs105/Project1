@@ -591,8 +591,14 @@ class BillsDB:
                 contains.append(b)
         for group in (exact, subset, contains):
             if group:
-                # closest first: shortest title that still matched
-                return sorted(group, key=lambda b: len(b["title"]))
+                # Government bills first, then the shortest title that still
+                # matched. A Government bill is the one that becomes law, so
+                # when a name is shared by both it is the one a question is
+                # about. Of the 3,678 bills here, 932 are Government and 2,746
+                # are Private Member's, and almost none of those ever pass.
+                return sorted(group, key=lambda b: (
+                    not str(b.get("type") or "").lower().startswith("gov"),
+                    len(b["title"])))
         return []
 
     # ---------- the ONE entry point ----------
