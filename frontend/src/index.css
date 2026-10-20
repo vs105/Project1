@@ -1,0 +1,146 @@
+@import "tailwindcss";
+
+@theme {
+  --color-accent-light: #E1A46B;
+  --color-accent-dark: #CC8D51;
+  --color-cream: #F2EEE5;
+  --color-ink-light: #414141;
+  --color-ink-dark: #242424;
+  --color-page-backdrop: #8E766E;
+
+  --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", Menlo, monospace;
+}
+
+/* ── Base resets ─────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: var(--color-page-backdrop);
+}
+
+/* ── Glass card utility ──────────────────────────────────────── */
+.glass-card {
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.60);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.06);
+}
+
+/* ── Satin fabric background ─────────────────────────────────── */
+.satin-bg {
+  background:
+    radial-gradient(ellipse at 20% 50%, #F6F1EA 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 30%, #E9E1D8 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 80%, #F6F1EA 0%, transparent 55%),
+    linear-gradient(135deg, #E9E1D8 0%, #F6F1EA 40%, #D9CEC3 70%, #F6F1EA 100%);
+  background-size: 100% 100%;
+}
+
+/* ── Scrollbar hiding ────────────────────────────────────────── */
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Accent gradient button ──────────────────────────────────── */
+.btn-accent {
+  background: linear-gradient(to bottom, #E1A46B, #CC8D51);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font-weight: 500;
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+.btn-accent:hover {
+  opacity: 0.92;
+}
+.btn-accent:active {
+  transform: scale(0.97);
+}
+.btn-accent:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── Ink gradient for AI bubbles ─────────────────────────────── */
+.ink-bubble {
+  background: linear-gradient(to bottom, #2E2E2E, #242424);
+  color: #fff;
+}
+
+/* ── Message fade-in ─────────────────────────────────────────── */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.msg-enter {
+  animation: fadeInUp 250ms ease-out both;
+}
+
+/* ── Focus ring utility ──────────────────────────────────────── */
+.focus-ring:focus-visible {
+  outline: 2px solid var(--color-accent-light);
+  outline-offset: 2px;
+}
+
+/* ── Markdown prose inside AI messages ───────────────────────── */
+.ai-prose p { margin: 0 0 0.75em; }
+.ai-prose p:last-child { margin-bottom: 0; }
+.ai-prose ul, .ai-prose ol { margin: 0.5em 0; padding-left: 1.25em; }
+.ai-prose li { margin-bottom: 0.25em; }
+.ai-prose strong { font-weight: 600; }
+.ai-prose table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  font-size: 13px;
+  width: 100%;
+}
+.ai-prose th, .ai-prose td {
+  border: 1px solid rgba(255,255,255,0.15);
+  padding: 6px 10px;
+  text-align: left;
+}
+.ai-prose th {
+  background: rgba(255,255,255,0.08);
+  font-weight: 500;
+}
+.ai-prose code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: rgba(0,0,0,0.25);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.ai-prose pre {
+  background: rgba(0,0,0,0.25);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  padding: 16px;
+  overflow-x: auto;
+  margin: 0.75em 0;
+}
+.ai-prose pre code {
+  background: transparent;
+  padding: 0;
+}
