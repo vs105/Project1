@@ -19,6 +19,7 @@ import os
 import sys
 
 from flask import Flask, jsonify, request, send_from_directory
+from flask_cors import CORS
 
 from step3_build_brain import Brain, MODEL_NAME as EMBED_MODEL
 from step4_talk import (answer_question, format_sources, LLM_MODELS, REFUSAL)
@@ -32,6 +33,7 @@ HISTORY = []
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 
 app = Flask(__name__, static_folder=None)
+CORS(app)
 
 # The brain is loaded ONCE and reused for every question (it is big).
 BRAIN = {"brain": None, "model": None, "error": None, "dir": "",

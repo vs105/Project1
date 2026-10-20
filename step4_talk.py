@@ -957,6 +957,60 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
         search_q = "%s bill %s of %s" % (question, locked["no"], locked["year"])
         filt = (locked["year"], locked["no"])
     hits = brain.search(search_q, top_n=top_n, part=part, filters=filt)
+
+    # Exact clause requests: retrieve the numbered clause directly.
+    clause_match = re.search(
+        r"\bclause\s+(\d+[A-Za-z]?)\b",
+        question,
+        re.IGNORECASE,
+    )
+    exact_text_requested = bool(
+        re.search(r"\b(exact text|quote|verbatim|word for word)\b",
+                  question, re.IGNORECASE)
+    )
+
+    if locked and clause_match and exact_text_requested:
+        wanted_clause = clause_match.group(1).lower()
+
+        bill_chunks = brain.chunks_for(locked["no"], locked["year"])
+        candidates = [
+            c for c in bill_chunks
+            if c.get("part") == "operative"
+            and str(c.get("clause_no", "")).lower() == wanted_clause
+        ]
+        print(
+    "EXACT CLAUSE DEBUG:",
+    "bill =", locked["no"],
+    "year =", locked["year"],
+    "clause =", wanted_clause,
+    "candidates =", len(candidates),
+)
+
+
+        if candidates:
+            # Prefer the most authoritative version available.
+            candidates.sort(
+                key=lambda c: SLOT_RANK.get(c.get("slot"), 9)
+            )
+            chosen = candidates[0]
+
+            reply = (
+                (pick_note + "\n\n" if pick_note else "")
+                + "Bill No. %s of %s — Clause %s "
+                  "(%s):\n\n%s"
+                % (
+                    locked["no"],
+                    locked["year"],
+                    clause_match.group(1),
+                    source_of(chosen),
+                    chosen["text"].strip(),
+                )
+            )
+
+            return reply, [
+                {"score": 1.0, "chunk": chosen}
+            ], "none"
+
     if locked and not hits:
         # the resolved bill has no readable text in the brain. The pick note
         # still belongs here: a Private Member's Bill with no readable text is
@@ -1135,6 +1189,7 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
         return (plain_answer(hits, wants, question) + "\n\n(" + why + ".)",
                 hits, "planner-failed")
     except Exception as e:
+        print("LLM ERROR:", repr(e))
         return (plain_answer(hits, wants, question) +
                 "\n\n(The model could not be reached: %s. The official text "
                 "is still exact.)" % type(e).__name__,
