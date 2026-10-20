@@ -161,7 +161,12 @@ def norm_title(name):
     s = (name or "").lower()
     s = re.sub(r"\b(1[5-9]\d\d|20\d\d)\b", " ", s)      # drop years
     s = re.sub(r"[^a-z0-9 ]", " ", s)
-    words = [w for w in s.split() if w not in NAME_NOISE and len(w) > 1]
+    # A single DIGIT is kept on purpose. "The Appropriation (No.3) Bill" and
+    # "(No.2) Bill" differ only by that digit, and dropping it made every
+    # Appropriation bill in the corpus normalise to the same key, so the
+    # bot asked "which one" about a bill it had been told exactly.
+    words = [w for w in s.split()
+             if w not in NAME_NOISE and (len(w) > 1 or w.isdigit())]
     return " ".join(words)
 
 

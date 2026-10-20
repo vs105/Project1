@@ -251,7 +251,47 @@ NAME_OPENER = (r"^(?:please\s+)?(?:tell\s+me\s+(?:about|what|more)|"
                r"(?:the\s+)?")
 NAME_CLOSER = (r"\s+(?:about|do|does|did|prescribe|provide|say|says|cover|"
                r"covers|replace|repeal|mean|change|amends?|contain|include|"
-               r"entail|deal|deals)\b.*$")
+               r"entail|deal|deals|pass(?:ed|es)?|assent\w*|introduc\w+|"
+               r"enact\w+|brought|come\s+into\s+force)\b.*$")
+# The same list WITHOUT the trailing ".*$", so every occurrence can be found.
+NAME_CLOSER_TAIL = (r"\s+(?:about|do|does|did|prescribe|provide|say|says|cover|"
+                    r"covers|replace|repeal|mean|change|amends?|contain|include|"
+                    r"entail|deal|deals|pass(?:ed|es)?|assent\w*|introduc\w+|"
+                    r"enact\w+|brought|come\s+into\s+force)\b")
+# The question words a bill name can never start with, once the leading
+# question has been cut off. If a candidate still starts with one of these it
+# is a question, not a name.
+LEADING_Q = (r"^(?:please\s+)?(?:what|when|why|who|whom|which|how|where)\b"
+             r"[\w\s'()-]*?\b(?:is|are|was|were|does|do|did|has|have|had|can|"
+             r"could|will|would|shall|should|must)\b\s+")
+
+
+# A bill name carries on past these words, so a "closer" that is followed by
+# one of them was not the end of the question - it was the middle of the name.
+# "The Climate Change Bill" ends in "change", which is also a question verb.
+NAME_TAIL = re.compile(r"^\s*(?:bill|act|ordinance|amendment|rules?|regulation|"
+                       r"\d{4})\b", re.I)
+
+
+def cut_at_closer(text):
+    """
+    Cut a question's tail off, leaving the bill's name behind.
+
+    The words in NAME_CLOSER are ordinary English as well as question verbs,
+    and bill names use them too. Two tests decide which match is the real end
+    of the question: what is left must be a name (at least two words), and
+    what follows must not look like the name carrying on. Without the second
+    test, "The Climate Change Bill" was cut at "change" and left "climate",
+    which matches no bill at all - so the bot fell back to searching the
+    whole brain for a question that had named its bill exactly.
+    """
+    for m in re.finditer(NAME_CLOSER_TAIL, text):
+        if NAME_TAIL.match(text[m.end():]):
+            continue
+        head = re.sub(r"\s*[?.]?\s*$", "", text[:m.start()])
+        if len(head.split()) >= 2:
+            return head
+    return text
 
 
 def local_plan(question, last_filters=None):
@@ -292,16 +332,33 @@ def local_plan(question, last_filters=None):
     # closer but no opener, so there is nothing to take the name out of.
     if not plan["bill_number"]:
         after_opener = re.sub(NAME_OPENER, "", q)
-        if after_opener != q:
-            after_closer = re.sub(NAME_CLOSER + r"\s*[?.]?\s*$", "",
-                                  after_opener)
-            # A closer is not always there. "tell me about the Finance Bill"
-            # simply ends with the name. That is safe for these openers, but not
-            # when what follows is another question, so those are kept out.
-            had_closer = after_closer != after_opener
-            cand = after_closer if had_closer else after_opener
-            if had_closer or not re.match(r"(how|which|when|why|what|who)\b",
-                                          cand):
+        had_opener = after_opener != q
+        base = after_opener if had_opener else q
+        if not had_opener:
+            # "When was X passed?" and "What punishment does X prescribe?"
+            # put a noun between the question word and the verb, so the strict
+            # opener above never matched and the name was silently dropped -
+            # the question then searched the whole brain instead of the one
+            # bill it had named. Cut the leading question off at the first
+            # auxiliary verb instead, which works whatever sits in between.
+            # This runs BEFORE the closer, because the closer also matches
+            # auxiliary verbs and would otherwise cut the name in half:
+            # "what punishment does X prescribe" lost everything after "does".
+            loose = re.sub(LEADING_Q, "", base)
+            if loose != base:
+                base = loose
+        after_closer = cut_at_closer(base)
+        # A closer is not always there. "tell me about the Finance Bill"
+        # simply ends with the name. That is safe for these openers, but not
+        # when what follows is another question, so those are kept out.
+        had_closer = after_closer != base
+        cand = after_closer if had_closer else base
+        # A name is only accepted when something actually bounded it: a closer
+        # was found, or the strict opener already cleaned the front. Without
+        # that, "how many bills were introduced in 2019" would leave
+        # "introduced in 2019" behind and be read as a bill name.
+        if ((had_closer or had_opener) and cand
+                and not re.match(r"(how|which|when|why|what|who)\b", cand)):
                 name = re.sub(r"\s+", " ", cand).strip(" ,.:?-")
                 if (len(name) >= 10
                         and not re.search(r"\b(it|its|that|this|these|those)\b",
@@ -353,6 +410,38 @@ def local_plan(question, last_filters=None):
 # THE RESOLVER - turn a name into a real bill, or say there is none
 # ----------------------------------------------------------------------------
 
+def title_clash(db, question, plan, bill):
+    """
+    The one bill the question's TITLE names, when it is not the bill the
+    question's NUMBER named. None when the title is missing, ambiguous, or
+    agrees with the number - only an unambiguous, DIFFERENT bill is a clash.
+
+    "What is the Digital Personal Data Protection Bill No. 114 of 2023 about?"
+    names the DPDP Bill, which is No. 113, and No. 114 of 2023 is the Pharmacy
+    (Amendment) Bill. Answering from the number alone silently switched laws.
+    """
+    # Take the number phrase out and let the ordinary planner name the bill, so
+    # exactly the same title rules apply as everywhere else. This is needed
+    # because the planner drops the title altogether once it sees a number.
+    stripped = re.sub(r"\bbill\s*(?:no\.?|number|num\.?)?\s*\d{1,3}\b"
+                      r"(?:\s*(?:of|/|,|\(|-)\s*20[0-2]\d\b)?", " ",
+                      question, flags=re.IGNORECASE)
+    if stripped.strip() == question.strip():
+        return None
+    p2 = local_plan(stripped)
+    names = list(p2.get("candidate_titles") or [])
+    if p2.get("bill_name"):
+        names.append(p2["bill_name"])
+    for name in names:
+        hits = db.find_by_title(name)
+        others = [h for h in hits
+                  if (str(h["no"]), str(h["year"]))
+                  != (str(bill["no"]), str(bill["year"]))]
+        if len(hits) == 1 and others:
+            return others[0]
+    return None
+
+
 def resolve_bill(db, plan, question, last_filters=None):
     """
     Work out exactly which bill the question is about.
@@ -361,6 +450,8 @@ def resolve_bill(db, plan, question, last_filters=None):
       {"kind": "one",  "bill": {...}}                 lock onto this bill
       {"kind": "many", "bills": [...]}                ask which year
       {"kind": "none", "name": "..."}                 no such bill
+      {"kind": "conflict", "bills": [a, b]}           the title and the number
+                                                     name two different bills
       {"kind": "skip"}                                no bill was named
 
     This is where "Triple Talaq" becomes Bill 82 of 2019, and where a name that
@@ -370,6 +461,9 @@ def resolve_bill(db, plan, question, last_filters=None):
     if plan["bill_number"] and plan["year"]:
         b = db.by_key.get((plan["bill_number"], plan["year"]))
         if b:
+            clash = title_clash(db, question, plan, b)
+            if clash:
+                return {"kind": "conflict", "bills": [b, clash]}
             return {"kind": "one", "bill": b}
         return {"kind": "none",
                 "name": "Bill No. %s of %s" % (plan["bill_number"], plan["year"])}
@@ -426,7 +520,13 @@ def resolve_bill(db, plan, question, last_filters=None):
                 return {"kind": "one", "bill": same[0]}
             # Show the bills of the year that was asked about first, so the
             # question "which year" is easy to answer.
-            hits = same + [b for b in hits if b not in same]
+            if plan["year"] and same:
+                # The user already named a year, so listing bills of OTHER
+                # years only makes them answer a question they already
+                # answered. When the year is known the list is that year's.
+                hits = same
+            else:
+                hits = same + [b for b in hits if b not in same]
             return {"kind": "many", "bills": hits[:12]}
     if names:
         return {"kind": "none", "name": plan["bill_name"] or names[0]}
@@ -474,14 +574,36 @@ def gov_first(bills):
             [b for b in bills if not is_gov(b)])
 
 
-def which_year(bills):
+def which_year(bills, year=None):
     """Ask the user to pick, and list the real options, Government bills first."""
     gov, pmb = gov_first(bills)
-    lines = ["I found %d bills with that name, so I will not guess which one "
-             "you mean. Which year?" % len(bills), ""]
+    example = (gov or pmb)[0]
+    # Ask for the identifier the question is MISSING. A question that already
+    # said "of 2023" has answered the year, so replying "Which year?" makes the
+    # bot look as though it never read the question - that is exactly what
+    # "the Bharatiya Nyaya Sanhita Bill of 2023" got back. Two bills can share
+    # a name inside one year, so the bill number is what is left to ask for.
+    if year:
+        opening = ("I found %d bills called that in %s, so I will not guess "
+                   "which one you mean. Which bill number?"
+                   % (len(bills), year))
+        closing = ('Ask again with the number, for example "Bill No. %s of %s".'
+                   % (example["no"], example["year"]))
+    else:
+        opening = ("I found %d bills with that name, so I will not guess which "
+                   "one you mean. Which year?" % len(bills))
+        closing = 'Ask again with the year, for example "... of %s".' % (
+            example["year"],)
+    lines = [opening, ""]
+    # The heading must not promise what the list does not deliver: it includes
+    # a lapsed bill, and a lapsed Government bill never became law. What is
+    # true, and useful, is WHO moved it - the government or a back-bencher -
+    # because that is what decides whether it ever had a chance.
     for head, group in (
-            ("Government bills - these are the ones that become law:", gov),
-            ("Private Member's bills - proposals that rarely become law:", pmb)):
+            ("Government bills - moved by the government, so these are the "
+             "ones that can become law:", gov),
+            ("Private Member's bills - moved by an individual MP; these "
+             "rarely become law:", pmb)):
         if not group:
             continue
         lines.append(head)
@@ -491,7 +613,7 @@ def which_year(bills):
         if len(group) > 10:
             lines.append("  - and %d more" % (len(group) - 10))
         lines.append("")
-    lines.append("Ask again with the year, for example \"... of 2019\".")
+    lines.append(closing)
     return "\n".join(lines)
 
 
@@ -749,7 +871,7 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
                     "mistake. Try naming the year as well.",
                     [], "no-such-bill")
         else:
-            return which_year(res["bills"]), [], "which-year"
+            return which_year(res["bills"], plan.get("year")), [], "which-year"
 
     # A Private Member's Bill is a proposal, not law, and nothing in its text
     # says so. The note is set whenever the bill actually used is a Private
@@ -768,6 +890,18 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
                          "been passed, so no Act came from it."
                          % (locked["no"], locked["year"],
                             locked.get("status") or "pending"))
+
+    if res["kind"] == "conflict":
+        # Two identities were supplied and they point at different laws. Picking
+        # one silently is the same failure as guessing a year.
+        numbered, titled = res["bills"]
+        return ("Those two do not go together. \"%s\" is Bill No. %s of %s, "
+                "but Bill No. %s of %s is \"%s\".\n\n"
+                "Which did you mean? Answer with the number and the year "
+                "together, for example \"Bill No. %s of %s\"."
+                % (titled["title"], titled["no"], titled["year"],
+                   numbered["no"], numbered["year"], numbered["title"],
+                   titled["no"], titled["year"]), [], "no-such-bill")
 
     # 4. Metadata questions go to the bill table. Exact, free, no LLM.
     if plan["intent"] == "metadata" and not plan["full_text"]:
@@ -834,6 +968,16 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
     if not hits:
         if unresolved:
             return no_such_bill(unresolved), [], "no-such-bill"
+        if res["kind"] == "skip":
+            # Nothing we hold is about the document that was named. This is
+            # where a question about an ACT lands: the corpus holds bills, and
+            # the Act is not one of them.
+            return ("I could not find a bill in my data that this question is "
+                    "about, so I will not answer from a different one.\n\n"
+                    "I hold 3,678 Lok Sabha BILLS from 2004 to 2026, not Acts. "
+                    "If you asked about an Act, ask about the bill that became "
+                    "it, or give the bill's number and year - for example "
+                    "\"Bill No. 99 of 2014\".", [], "no-such-bill")
         return REFUSAL, [], "refusal"
 
     # 5a. If the answer spans several bills but the question clearly names one
@@ -862,6 +1006,37 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
                 hits = [h for h in hits
                         if (h["chunk"].get("bill_no"),
                             h["chunk"].get("year")) == best]
+
+    # 5a2. With no bill locked, the answer must still come from a bill whose
+    #      TITLE relates to the document the question named.
+    #
+    #      "The Right to Fair Compensation ... Act, 2013" was answered from the
+    #      Appropriation (Railways) No. 4 Bill, because that bill's corrigendum
+    #      quotes the Act in full - the WORDS matched, the document did not.
+    #      Text overlap is not identity, and a semantically similar unrelated
+    #      bill must never be allowed to win.
+    if not locked and hits:
+        qwords = {w for w in re.findall(r"[a-z]{4,}", question.lower())
+                  if w not in QUESTION_WORDS}
+        if qwords:
+            keep = [h for h in hits
+                    if qwords & set(re.findall(
+                        r"[a-z]{4,}",
+                        (h["chunk"].get("bill_title") or "").lower()))]
+            if not keep:
+                hits = []
+            elif len(keep) < len(hits):
+                hits = keep
+    if not hits and res["kind"] == "skip" and not locked:
+        # Nothing we hold is about the document that was named. This is where a
+        # question about an ACT lands: the corpus holds bills, and the Act is
+        # not one of them.
+        return ("I could not find a bill in my data that this question is "
+                "about, so I will not answer from a different one.\n\n"
+                "I hold 3,678 Lok Sabha BILLS from 2004 to 2026, not Acts. "
+                "If you asked about an Act, ask about the bill that became it, "
+                "or give the bill's number and year - for example "
+                "\"Bill No. 99 of 2014\".", [], "no-such-bill")
 
     # 5b. Remember which bill we just answered about.
     #
@@ -1037,9 +1212,18 @@ SOO = r"STATEMENT\s+OF\s+OBJECTS\s+AND\s+REASONS"
 NOTES = r"NOTES\s+ON\s+CLAUSES"
 
 
+# Furniture printed after a long title in the published PDFs: a stage marker in
+# brackets, and the gazette's own file number. The Digital Personal Data
+# Protection Bill was being described as "...incidental thereto. (As passed by
+# the Houses of Parliament) MGIPMRND-306RS-16-08-2023."
+TITLE_TAIL = re.compile(
+    r"[.;]\s*(?:\(\s*AS\s+(?:INTRODUCED|PASSED)\b[^)]{0,70}\)"
+    r"|\b[A-Z]{3,}[A-Z0-9]*-\d+[A-Z0-9\-]*)", re.IGNORECASE)
+
+
 def cut_at_heading(s):
     """
-    Truncate at the first section heading.
+    Truncate at the first section heading, stage marker or gazette file number.
 
     A long title is quoted with a 420-character window so that a title broken
     across a page still comes out whole, and that window runs straight on into
@@ -1049,7 +1233,10 @@ def cut_at_heading(s):
     cut is made there and the full stop is kept.
     """
     m = re.search(r"[.;]\s*(?:%s)" % "|".join(HEAD_WORDS), s, re.IGNORECASE)
-    return s[:m.start() + 1] if m else s
+    t = TITLE_TAIL.search(s)
+    if m and (not t or m.start() <= t.start()):
+        return s[:m.start() + 1]
+    return s[:t.start() + 1] if t else s
 
 
 def strip_headings(s):
@@ -1165,6 +1352,21 @@ SLOT_LABEL = {
 # file is a draft that was later changed. A clause that exists only in the
 # draft is still shown - labelled as the draft - because refusing to answer is
 # worse than answering with the version we hold.
+# How each document is named when the answer says where it read the bill from.
+# The article is carried here rather than bolted on outside, because
+# "from the the gazette version" and "from the as introduced" both read as
+# typos in the answer.
+SPINE_NAME = {
+    "billGazettedFile": "the gazette version",
+    "billPassedInBothHousesFile": "the version passed by both Houses",
+    "billPassedInLSFile": "the Lok Sabha-passed version",
+    "billPassedInRSFile": "the Rajya Sabha-passed version",
+    "billIntroducedFile": "the introduced version",
+    "billSynopsisFile": "the synopsis",
+    "reportFile": "the committee report",
+    "errataFile": "the errata sheet",
+}
+
 SLOT_RANK = {
     "billGazettedFile": 0,
     "billPassedInBothHousesFile": 1,
@@ -1287,7 +1489,8 @@ def bill_digest(brain, bill, question, wants):
     # Which document the skeleton was read from. A bill's chapters are numbered
     # differently between the draft and the Act, so a skeleton quoted without
     # its version is a claim the reader cannot check.
-    spine_src = source_of(spine[0]) if spine else ""
+    spine_src = SPINE_NAME.get(spine[0].get("slot"), "the introduced version") \
+        if spine else ""
     terms, seen = [], {}
     for c in spine:
         num = int(re.match(r"\d+", c["clause_no"]).group(0))
@@ -1414,7 +1617,7 @@ def bill_briefing(d, bill):
         out.append("Why it was brought: %s (%s)" % (d["why"], d["why_src"]))
     if d["terms"]:
         out.append("")
-        out.append("What it covers%s:" % ((" (from the %s)" % d["spine_src"])
+        out.append("What it covers%s:" % ((" (from %s)" % d["spine_src"])
                                            if d.get("spine_src") else ""))
         for lo, hi, t in d["terms"]:
             name = t if t else "the main provisions"
