@@ -49,8 +49,9 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 # Groq is the one provider this project uses. The gpt-oss models come first
 # because Groq retired the llama-3.3 and llama-3.1 ids for free keys. The old
 # names stay last because they still work on paid plans.
-LLM_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b",
-              "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
+LLM_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
+
 
 REFUSAL = ("I could not find this in the official bill text I hold, so I would "
            "rather not guess. Try naming the bill and the year, or ask what the "
@@ -83,45 +84,72 @@ class AuthError(Exception):
     """The key was rejected. Nothing to retry, so say it plainly."""
 
 
-def groq_chat(messages, api_key, models, json_mode=False):
-    """
-    Send messages to Groq and return the text reply.
 
-    json_mode=True asks Groq to answer with a JSON object only, which is what
-    the question planner needs.
-    """
+def groq_chat(messages, api_key, models, json_mode=False):
+    """Send messages to Groq and return the text reply."""
     failures = []
+
     for model in models:
-        body = {"model": model, "messages": messages, "temperature": 0}
+        body = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": 800,
+        }
+
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+
         req = urllib.request.Request(
-            GROQ_URL, data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json",
-                     "User-Agent": "bills-chatbot/1.0",
-                     "Authorization": "Bearer " + api_key})
+            GROQ_URL,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "bills-chatbot/1.0",
+                "Authorization": "Bearer " + api_key,
+            },
+        )
+
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                 data = json.load(r)
+
         except urllib.error.HTTPError as e:
             msg = e.read().decode("utf-8", "replace")
-            if e.code in (401, 403) or "invalid_api_key" in msg:
-                raise AuthError("Groq rejected the API key (HTTP %d).\n"
-                                "Groq's own reply: %s" % (e.code, msg[:300]))
-            failures.append("%s: HTTP %d %s"
-                            % (model, e.code, msg[:120].replace("\n", " ")))
+            failures.append(
+                "%s: HTTP %d %s"
+                % (model, e.code, msg[:200].replace("\n", " "))
+            )
+
+            # Try the next model if this model is unavailable
+            # or the request is too large for it.
+            if e.code in (400, 401, 403):
+                if e.code in (401, 403) or "invalid_api_key" in msg:
+                    raise RuntimeError(
+                        "Groq API key rejected. Check your .env file."
+                    )
             continue
-        except urllib.error.URLError:
-            raise
+
+        except urllib.error.URLError as e:
+            failures.append("%s: connection error %s" % (model, e))
+            continue
+
         try:
-            text = data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError):
-            failures.append(model + ": empty reply")
+            text = data["choices"][0]["message"]["content"]
+            text = (text or "").strip()
+        except (KeyError, IndexError, TypeError):
+            failures.append(model + ": empty or invalid reply")
             continue
+
         if text:
             return text, "groq:" + model
-    raise RuntimeError("Groq did not answer with any of these models:\n  "
-                       + "\n  ".join(failures))
+
+        failures.append(model + ": empty reply")
+
+    raise RuntimeError(
+        "Groq did not answer with any configured models:\n  "
+        + "\n  ".join(failures)
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -707,22 +735,42 @@ Rules you must follow:
 """
 
 
+
 def build_writer_messages(question, hits, plan, mode):
-    parts = [WRITER_SYSTEM, "", "Extracts from official bill documents:"]
-    for n, h in enumerate(hits, 1):
+    parts = ["Extracts from official bill documents:"]
+
+    # Limit the total context sent to Groq.
+    max_hits = 5
+    max_chars_per_hit = 1200
+
+    for n, h in enumerate(hits[:max_hits], 1):
         c = h["chunk"]
-        label = ("Bill %s of %s, %s, clause %s"
-                 % (c.get("bill_no"), c.get("year"), c.get("slot"),
-                    c.get("clause_no") or "n/a"))
-        parts.append("[%d] %s\n%s" % (n, label, c["text"][:2500]))
-    parts.append("")
+        label = (
+            "Bill %s of %s, %s, clause %s"
+            % (
+                c.get("bill_no"),
+                c.get("year"),
+                c.get("slot"),
+                c.get("clause_no") or "n/a",
+            )
+        )
+
+        text = c.get("text", "")[:max_chars_per_hit]
+        parts.append("[%d] %s\n%s" % (n, label, text))
+
     if plan.get("full_text"):
-        parts.append("The user asked for full details, so cover every point the "
-                     "extracts support, in order.")
+        parts.append(
+            "Cover every point supported by these extracts, in order."
+        )
+
     parts.append("Question: " + question)
     parts.append("Answer:")
-    return [{"role": "system", "content": WRITER_SYSTEM},
-            {"role": "user", "content": "\n".join(parts)}]
+
+    return [
+        {"role": "system", "content": WRITER_SYSTEM},
+        {"role": "user", "content": "\n".join(parts)},
+    ]
+
 
 
 # ----------------------------------------------------------------------------
@@ -959,17 +1007,23 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
     hits = brain.search(search_q, top_n=top_n, part=part, filters=filt)
 
     # Exact clause requests: retrieve the numbered clause directly.
+    
+    # Retrieve numbered clauses directly when the bill is known.
     clause_match = re.search(
         r"\bclause\s+(\d+[A-Za-z]?)\b",
         question,
         re.IGNORECASE,
     )
+
     exact_text_requested = bool(
-        re.search(r"\b(exact text|quote|verbatim|word for word)\b",
-                  question, re.IGNORECASE)
+        re.search(
+            r"\b(exact text|quote|verbatim|word for word)\b",
+            question,
+            re.IGNORECASE,
+        )
     )
 
-    if locked and clause_match and exact_text_requested:
+    if locked and clause_match:
         wanted_clause = clause_match.group(1).lower()
 
         bill_chunks = brain.chunks_for(locked["no"], locked["year"])
@@ -978,38 +1032,73 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
             if c.get("part") == "operative"
             and str(c.get("clause_no", "")).lower() == wanted_clause
         ]
-        print(
-    "EXACT CLAUSE DEBUG:",
-    "bill =", locked["no"],
-    "year =", locked["year"],
-    "clause =", wanted_clause,
-    "candidates =", len(candidates),
-)
-
 
         if candidates:
-            # Prefer the most authoritative version available.
             candidates.sort(
                 key=lambda c: SLOT_RANK.get(c.get("slot"), 9)
             )
             chosen = candidates[0]
+            
+            display_text = chosen["text"].strip()
 
-            reply = (
-                (pick_note + "\n\n" if pick_note else "")
-                + "Bill No. %s of %s — Clause %s "
-                  "(%s):\n\n%s"
-                % (
-                    locked["no"],
-                    locked["year"],
-                    clause_match.group(1),
-                    source_of(chosen),
-                    chosen["text"].strip(),
-                )
+            # Remove the next chapter heading and everything after it.
+            display_text = re.split(
+                r"\s+CHAPTER\s+II\s+RATES\s+OF\s+INCOME-TAX\b",
+                display_text,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip()
+
+            # Remove the next section heading at the end.
+            display_text = re.sub(
+                r"\s+Income-tax\.\s*$",
+                "",
+                display_text,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            # Remove the standalone clause number, such as "1."
+            display_text = re.sub(
+                r"^\d+[.)][ \t]*\n*",
+                "",
+                display_text,
+                count=1,
+            ).strip()
+
+            # Put subsections and paragraphs on separate lines.
+            display_text = re.sub(
+                r"\s+(\(\d+\)|\([a-z]\))\s*",
+                r"\n\n\1 ",
+                display_text,
             )
 
-            return reply, [
-                {"score": 1.0, "chunk": chosen}
-            ], "none"
+            # Normalize spaces and blank lines.
+            display_text = re.sub(r"[ \t]+", " ", display_text)
+            display_text = re.sub(r"\n\s*\n+", "\n\n", display_text)
+            display_text = display_text.strip()
+
+
+            # Exact-text requests get the official clause itself.
+            if exact_text_requested:
+                reply = (
+                    (pick_note + "\n\n" if pick_note else "")
+                    + "Bill No. %s of %s — Clause %s (%s):\n\n%s"
+                    % (
+                        locked["no"],
+                        locked["year"],
+                        clause_match.group(1),
+                        source_of(chosen),
+                        display_text,
+                    )
+                )
+                return reply, [
+                    {"score": 1.0, "chunk": chosen}
+                ], "none"
+
+            # For ordinary questions, make the exact clause the
+            # evidence sent to the answer generator.
+            hits = [{"score": 1.0, "chunk": chosen}]
+
 
     if locked and not hits:
         # the resolved bill has no readable text in the brain. The pick note

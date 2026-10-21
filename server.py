@@ -17,9 +17,12 @@ Endpoints
 import argparse
 import os
 import sys
+from dotenv import load_dotenv
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+
+load_dotenv()
 
 from step3_build_brain import Brain, MODEL_NAME as EMBED_MODEL
 from step4_talk import (answer_question, format_sources, LLM_MODELS, REFUSAL)
