@@ -12,7 +12,7 @@ import os
 import streamlit as st
 
 from step3_build_brain import Brain, MODEL_NAME as EMBED_MODEL
-from step4_talk import answer_question, format_sources, try_facts
+from step4_talk import answer_question, format_sources, get_facts, facts_reply
 
 
 def brain_model(brain_dir):
@@ -87,9 +87,10 @@ if prompt:
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    facts_reply = try_facts(brain, prompt, st.session_state.get("last_filters"))
-    if facts_reply:  # dates / status / counts: exact answer from the database, no key needed.
-        reply, hits, used = facts_reply, [], "sansad-metadata"
+    db = get_facts()
+    fact_answer = facts_reply(db, prompt, None) if db else None
+    if fact_answer:
+        reply, hits, used = fact_answer, [], "sansad-metadata"
     elif not chunks_only and not api_key and not os.environ.get("GROQ_API_KEY"):
         reply = ("⚠️ Add your free Gemini API key in the sidebar "
                  "(https://aistudio.google.com/apikey), set a free Groq key "
@@ -100,8 +101,8 @@ if prompt:
             try:  # quota/key/net errors arrive as SystemExit: show, don't crash.
                 reply, hits, used = answer_question(brain, prompt, mode, api_key,
                                                     None, top_n, "all",
-                                                    chunks_only, False,
-                                                    st.session_state.get("last_filters"))
+                                                    st.session_state.get("last_filters"),
+                                                    chunks_only, False)
             except SystemExit as e:
                 reply = str(e) or "The answer service failed - retry, or tick Chunks only."
                 hits, used = [], "none"
