@@ -22,3 +22,4 @@ test_data/
 # Generated evaluation outputs (optional)
 eval_report.json
 eval_report.txt
+notepad DPRJProject1.env.txt
