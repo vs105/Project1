@@ -31,7 +31,7 @@ Run it like this:
     python step4_talk.py --ask "what punishment does the Muslim Women Bill 2019 prescribe"
     python step4_talk.py --interactive
 """
-
+import traceback
 import argparse
 import json
 import os
@@ -84,7 +84,6 @@ class AuthError(Exception):
     """The key was rejected. Nothing to retry, so say it plainly."""
 
 
-
 def groq_chat(messages, api_key, models, json_mode=False):
     """Send messages to Groq and return the text reply."""
     failures = []
@@ -94,8 +93,12 @@ def groq_chat(messages, api_key, models, json_mode=False):
             "model": model,
             "messages": messages,
             "temperature": 0,
-            "max_tokens": 800,
+            "max_completion_tokens": 2048,
         }
+
+        # Reduce reasoning-token usage for GPT-OSS models.
+        if model.startswith("openai/gpt-oss"):
+            body["reasoning_effort"] = "low"
 
         if json_mode:
             body["response_format"] = {"type": "json_object"}
@@ -116,41 +119,51 @@ def groq_chat(messages, api_key, models, json_mode=False):
 
         except urllib.error.HTTPError as e:
             msg = e.read().decode("utf-8", "replace")
+
             failures.append(
-                "%s: HTTP %d %s"
-                % (model, e.code, msg[:200].replace("\n", " "))
+                f"{model}: HTTP {e.code} {msg[:200]}"
             )
 
-            # Try the next model if this model is unavailable
-            # or the request is too large for it.
-            if e.code in (400, 401, 403):
-                if e.code in (401, 403) or "invalid_api_key" in msg:
-                    raise RuntimeError(
-                        "Groq API key rejected. Check your .env file."
-                    )
+            if e.code in (401, 403):
+                raise RuntimeError(
+                    "Groq API authentication failed. Check your API key."
+                )
+
             continue
 
         except urllib.error.URLError as e:
-            failures.append("%s: connection error %s" % (model, e))
+            failures.append(f"{model}: connection error {e}")
+            continue
+
+        except Exception as e:
+            failures.append(f"{model}: {type(e).__name__}: {e}")
             continue
 
         try:
-            text = data["choices"][0]["message"]["content"]
-            text = (text or "").strip()
-        except (KeyError, IndexError, TypeError):
-            failures.append(model + ": empty or invalid reply")
-            continue
+            choice = data["choices"][0]
+            message = choice.get("message", {})
 
-        if text:
-            return text, "groq:" + model
+            content = message.get("content") or ""
+            text = content.strip() if isinstance(content, str) else ""
 
-        failures.append(model + ": empty reply")
+            finish_reason = choice.get("finish_reason")
+
+            if text:
+                return text, "groq:" + model
+
+            failures.append(
+                f"{model}: empty reply (finish_reason={finish_reason})"
+            )
+
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
+            failures.append(
+                f"{model}: invalid response ({type(e).__name__})"
+            )
 
     raise RuntimeError(
         "Groq did not answer with any configured models:\n  "
         + "\n  ".join(failures)
     )
-
 
 # ----------------------------------------------------------------------------
 # THE PLANNER - what is the user actually asking for
@@ -731,7 +744,11 @@ Rules you must follow:
 3. Do not quote long passages. Say what the bill does in your own words, and
    name the clause number when the extract shows one.
 4. Never invent a date, a number, a ministry or a clause number.
-5. Write 2 to 4 sentences unless the question asks for all details.
+5. For specific questions, answer in 2 to 4 sentences.
+   For summaries or overviews, give a structured answer covering
+   the main provisions supported by the extracts.
+   Do not claim the summary is complete if the extracts are incomplete.
+   Do not confuse different bills or different versions of a bill.
 """
 
 
@@ -740,8 +757,8 @@ def build_writer_messages(question, hits, plan, mode):
     parts = ["Extracts from official bill documents:"]
 
     # Limit the total context sent to Groq.
-    max_hits = 5
-    max_chars_per_hit = 1200
+    max_hits = 12
+    max_chars_per_hit = 1600
 
     for n, h in enumerate(hits[:max_hits], 1):
         c = h["chunk"]
@@ -979,7 +996,18 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
     # thoroughness, it is noise - the answer gets chosen from two hundred
     # clauses instead of the one that matters. The routing above has already
     # sent overview questions to the narrative half, so that is the signal.
-    whole_bill = bool(locked and (part == "narrative" or plan["full_text"]))
+
+    whole_bill = bool(
+        locked and (
+            part == "narrative"
+            or plan["full_text"]
+            or re.search(
+                r"\b(summarize|summarise|summary|overview)\b",
+                question,
+                re.IGNORECASE
+            )
+        )
+    )
 
     if part == "narrative" and not locked:
         # "Tell me about X" wants the bill's own Objects and Reasons, but that
@@ -1075,6 +1103,21 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
             # Normalize spaces and blank lines.
             display_text = re.sub(r"[ \t]+", " ", display_text)
             display_text = re.sub(r"\n\s*\n+", "\n\n", display_text)
+                        # Remove the next chapter heading and following text.
+            display_text = re.split(
+                r"\s+CHAPTER\s+[IVXLCDM]+\s+",
+                display_text,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+
+            # Fix references such as "sub-section (8)".
+            display_text = re.sub(
+                r"(sub-section)\s*\n+\s*(\(\d+\))\s*,",
+                r"\1 \2,",
+                display_text,
+                flags=re.IGNORECASE,
+            )
             display_text = display_text.strip()
 
 
@@ -1247,21 +1290,96 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
     if mock_llm:
         out = plain_answer(hits, wants, question)
         return ((pick_note + "\n\n" + out) if pick_note else out, hits, "mock")
+
     writer_hits = hits
-    if digest:
-        # Same whole bill, handed to the model instead of the top three
-        # clauses. Capped because a hundred-clause bill is far more tokens than
-        # one request should carry; the digest already holds the structure, so
-        # what is sent here is the text the model will actually quote.
-        pool = digest["chunks"]
-        keep = [c for c, _ in digest["asked"]]
+
+    print("DEBUG whole_bill:", whole_bill)
+    print("DEBUG digest:", bool(digest), "locked:", bool(locked))
+
+    if digest and locked:
+        # Get all chunks belonging to this bill.
+        pool = brain.chunks_for(locked["no"], locked["year"])
+
+        print("DEBUG total bill chunks:", len(pool))
+        print("DEBUG unique clauses:", len({
+            str(c.get("clause_no"))
+            for c in pool
+            if c.get("part") == "operative" and c.get("clause_no")
+        }))
+
+        # Prefer the passed version, then the introduced version.
+        slot_priority = {
+            "billPassedInBothHousesFile": 0,
+            "billPassedInLokSabhaFile": 1,
+            "billIntroducedFile": 2
+        }
+
+        # Keep one chunk per clause number.
+        unique_clauses = {}
+
         for c in pool:
-            if len(keep) >= 40:
-                break
-            if not any(c is k for k in keep):
-                keep.append(c)
-        writer_hits = [{"score": 1.0, "chunk": c} for c in keep]
+            if c.get("part") != "operative":
+                continue
+
+            clause_no = str(c.get("clause_no") or "").strip()
+
+            if not clause_no.isdigit():
+                continue
+
+            if (
+                clause_no not in unique_clauses
+                or slot_priority.get(c.get("slot"), 99)
+                < slot_priority.get(
+                    unique_clauses[clause_no].get("slot"), 99
+                )
+            ):
+                unique_clauses[clause_no] = c
+
+        clauses = sorted(
+            unique_clauses.values(),
+            key=lambda c: int(c["clause_no"])
+        )
+
+        # Select up to 10 clauses spread across the bill.
+        selected = []
+
+        if clauses:
+            count = min(10, len(clauses))
+
+            for i in range(count):
+                pos = (
+                    round(i * (len(clauses) - 1) / (count - 1))
+                    if count > 1 else 0
+                )
+
+                selected.append(clauses[pos])
+
+        # Add up to 2 narrative chunks.
+        narratives = [
+            c for c in pool
+            if c.get("part") == "narrative"
+        ]
+
+        selected.extend(narratives[:2])
+
+        writer_hits = [
+            {"score": 1.0, "chunk": c}
+            for c in selected
+        ]
+
     try:
+        print("\n=== CHUNKS SENT TO GROQ ===")
+
+        for i, h in enumerate(writer_hits[:12], 1):
+                c = h["chunk"]
+                print(
+                    i,
+                    "Clause:", c.get("clause_no"),
+                    "Part:", c.get("part"),
+                    "Slot:", c.get("slot")
+                )
+
+        print("===========================\n")
         text, used = groq_chat(build_writer_messages(question, writer_hits,
                                                      plan, mode),
                                api_key, llm_models or LLM_MODELS)
@@ -1277,8 +1395,11 @@ def answer_question(brain, question, mode="exact", api_key="", llm_models=None,
                "the official text rather than explained by the model")
         return (plain_answer(hits, wants, question) + "\n\n(" + why + ".)",
                 hits, "planner-failed")
+    
     except Exception as e:
-        print("LLM ERROR:", repr(e))
+        import traceback
+        traceback.print_exc()
+
         return (plain_answer(hits, wants, question) +
                 "\n\n(The model could not be reached: %s. The official text "
                 "is still exact.)" % type(e).__name__,
