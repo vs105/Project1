@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Parliament Bills Chatbot</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { margin-bottom: 4px; }
+    .muted { opacity: .72; }
+    #chat { display: flex; flex-direction: column; gap: 12px; margin: 22px 0; }
+    .message { padding: 13px 15px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .user { align-self: flex-end; max-width: 85%; background: color-mix(in srgb, Highlight 14%, Canvas); }
+    .assistant { align-self: stretch; }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    input, select, button { font: inherit; padding: 10px 12px; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: 8px; }
+    #question { flex: 1 1 360px; }
+    button { cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    details { margin-top: 10px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .error { border-color: #c44; }
+    .settings { margin-top: 18px; padding: 14px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 10px; }
+    label { display: inline-flex; gap: 7px; align-items: center; }
+    #status { margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h1>🏛️ Parliament Bills Chatbot</h1>
+  <div class="muted">Ask about Lok Sabha and Rajya Sabha bills. Groq is optional; local mode works without an API key.</div>
+  <div id="status" class="muted">Checking the local search brain ...</div>
+  <div id="chat" aria-live="polite"></div>
+  <form id="ask-form" class="controls">
+    <input id="question" name="question" maxlength="2000" autocomplete="off" placeholder="Ask about a bill, its provisions, dates or status ..." required>
+    <button id="send" type="submit">Ask</button>
+  </form>
+  <section class="settings">
+    <div class="controls">
+      <label>Mode <select id="mode"><option value="exact">Exact</option><option value="explain">Explain</option></select></label>
+      <label>Extracts <select id="top-n"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option></select></label>
+      <label><input id="local-only" type="checkbox"> Local mode (no Groq)</label>
+    </div>
+    <p><label for="api-key">Groq API key (optional)</label></p>
+    <input id="api-key" type="password" autocomplete="off" style="width:min(100%,520px)" placeholder="Leave empty to use local mode">
+    <p class="muted">The key is sent only to this local server for the current request; this page does not save it.</p>
+  </section>
+  <script>
+    const chat = document.getElementById('chat');
+    const statusBox = document.getElementById('status');
+    const form = document.getElementById('ask-form');
+    const questionInput = document.getElementById('question');
+    const sendButton = document.getElementById('send');
+    const history = [];
+    let lastFilters = null;
+
+    function addMessage(role, text, error=false) {
+      const node = document.createElement('article');
+      node.className = `message ${role}` + (error ? ' error' : '');
+      node.textContent = text;
+      chat.appendChild(node);
+      node.scrollIntoView({behavior: 'smooth', block: 'end'});
+      return node;
+    }
+
+    async function checkHealth() {
+      try {
+        const response = await fetch('/api/health');
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || 'Brain is not loaded.');
+        statusBox.textContent = `Ready · ${data.chunks.toLocaleString()} indexed chunks · ${data.facts_bills.toLocaleString()} metadata records`;
+      } catch (error) {
+        statusBox.textContent = `Not ready: ${error.message}`;
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const question = questionInput.value.trim();
+      if (!question) return;
+      addMessage('user', question);
+      questionInput.value = '';
+      sendButton.disabled = true;
+      statusBox.textContent = 'Searching ...';
+      try {
+        const response = await fetch('/api/ask', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            question,
+            mode: document.getElementById('mode').value,
+            top_n: Number(document.getElementById('top-n').value),
+            mock_llm: document.getElementById('local-only').checked,
+            api_key: document.getElementById('api-key').value,
+            history: history.slice(-4),
+            last_filters: lastFilters
+          })
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        let answer = `${data.reply}\n\nAnswer path: ${data.used}`;
+        if (data.filters && (data.filters.year || data.filters.bill_no)) {
+          answer += `\nResolved bill: ${data.filters.house || 'House not recorded'} · Bill ${data.filters.bill_no || '?'} of ${data.filters.year || '?'}`;
+        }
+        const sourceText = data.sources_text || '';
+        if (sourceText) answer += `\n\nSources\n${sourceText}`;
+        addMessage('assistant', answer);
+        history.push([question, data.reply || '']);
+        if (history.length > 4) history.shift();
+        if (data.filters && data.filters.year && data.filters.bill_no) {
+          lastFilters = [data.filters.year, data.filters.bill_no, data.filters.house || null];
+        } else { lastFilters = null; }
+        statusBox.textContent = 'Ready';
+      } catch (error) {
+        addMessage('assistant', error.message, true);
+        statusBox.textContent = 'Request failed';
+      } finally {
+        sendButton.disabled = false;
+        questionInput.focus();
+      }
+    });
+
+    checkHealth();
+  </script>
+</body>
+</html>

@@ -20,7 +20,7 @@ What it can answer (no API key needed for ANY of this):
   * data check: flags impossible/odd dates in the source data (shown, not hidden)
 
 Run  : python bills_db.py --ask "When was Bill No. 370 of 2019 passed?"
-       python bills_db.py --selftest          # 20 built-in checks
+       python bills_db.py --selftest          # fixed checks + sampled identity/date evaluations
        python bills_db.py --export bills.db   # SQLite file (for dashboard)
 
 VIVA ONE-LINERS (all true, all in this file):
@@ -34,11 +34,116 @@ import difflib
 import os
 import re
 import sqlite3
+import threading
+import weakref
+from attribution import asks_person, recorded_by, conflict_note
 from datetime import datetime
 
+# bills_metadata_merge.csv is NOT here: it is the merge REPORT (columns
+# action/house/billNumber/billYear/what/title), not metadata. Reading it
+# would give every bill an empty title. bills_metadata.csv already holds
+# the merged superset, because the RTI merge writes its additions into it.
 CSV_CANDIDATES = ["bills_data/bills_metadata.csv", "bills_metadata.csv",
                   "test_data/bills_metadata.csv"]
-SRC_LINE = "_Source: Sansad bill metadata (official)._"
+SRC_LINE = ("_Metadata provenance is not recorded for this dataset copy; "
+            "verify the underlying bill record on the official Sansad portal._")
+
+def metadata_source_line(bill):
+    primary = str(bill.get("source_primary") or "").strip().lower()
+    filled = str(bill.get("filled_from") or "").strip()
+    if primary == "sansad":
+        note = "_Source: Sansad bill metadata (primary/official)._"
+        if filled:
+            note += " Some blank fields were supplemented from: " + filled + "."
+        return note
+    if primary == "rti":
+        return "_Source: RTI Wiki metadata (secondary); verify against Sansad._"
+    return SRC_LINE
+
+# ------------------------------------------------------------------ identity --
+# One bill's identity is (house, bill_number_norm, year). NOT the raw string.
+#
+# Rajya Sabha numbers are Roman (I, II, ... LXXXVIII) and Lok Sabha numbers are
+# Arabic (1..999), so the raw strings never match each other. A user who asks
+# about "Bill 38 of 2018" means Rajya Sabha Bill XXXVIII of 2018, and until now
+# nothing could connect those two spellings.
+#
+# Normalising to an integer is what connects them, and it is ALSO why the house
+# has to be in the key. Measured on the whole corpus: (norm, year) alone has
+# 1,289 collisions, because Lok Sabha Bill 10 of 2004 and Rajya Sabha Bill X of
+# 2004 both normalise to 10. (house, norm, year) has 0. Without the house,
+# normalising would turn 5,169 unambiguous bills into 1,289 ambiguous ones.
+
+# Only WELL-FORMED Roman numerals. A greedy subtractive reader accepts "IIII"
+# as 4 and "IC" as 101, which would silently invent bill numbers that do not
+# exist. This pattern rejects both.
+_ROMAN_OK = re.compile(r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$")
+_ROMAN_VALS = [(1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"),
+               (90, "XC"), (50, "L"), (40, "XL"), (10, "X"), (9, "IX"),
+               (5, "V"), (4, "IV"), (1, "I")]
+
+
+def roman_to_int(s):
+    """'XXXVIII' -> 38. Returns None for anything that is not a well-formed
+    Roman numeral, so a junk value can never become a plausible bill number."""
+    s = (s or "").strip().upper().replace(" ", "")
+    if not s or not _ROMAN_OK.match(s):
+        return None
+    i = total = 0
+    for value, numeral in _ROMAN_VALS:
+        while s.startswith(numeral, i):
+            total += value
+            i += len(numeral)
+    return total if i == len(s) else None
+
+
+def normalize_bill_number(raw):
+    """
+    'XXXVIII' -> ('XXXVIII', 38)      '38' -> ('38', 38)      '' -> ('', None)
+
+    Returns (cleaned original string, integer or None). The original string is
+    kept because it is the OFFICIAL form and must be shown to the user; the
+    integer is what matching uses. None means "not a number I understand", and
+    callers must fall back to the raw string rather than dropping the bill.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return "", None
+    if re.fullmatch(r"\d{1,4}", raw):
+        return raw, int(raw)
+    return raw, roman_to_int(raw)
+
+
+# Which house a question's BILL belongs to. The house word must sit immediately
+# in front of the word "bill": "Rajya Sabha Bill No. 38 of 2018" is a Rajya
+# Sabha bill. "Bill XXXVIII of 2018 passed by Lok Sabha" is a Rajya Sabha bill
+# that the Lok Sabha passed - a different fact - and reading that as a house
+# filter answers about the wrong law.
+# ... singular OR plural. "how many Rajya Sabha bills in 2004" is the common
+# phrasing for a count, and the singular-only pattern matched nothing there.
+# One optional word may sit between "Sabha" and "bill(s)" so that
+# "Rajya Sabha Government bills" and "Lok Sabha money bills" are filtered
+# too. "passed by the Lok Sabha" still cannot match, because there is no
+# "bill" word directly after the house name.
+HOUSE_BILL = re.compile(r"\b(?:the\s+)?(rajya|lok)\s+sabha\s+(?:\w+\s+)?bills?\b",
+                        re.IGNORECASE)
+
+
+def norm_key(house, bill_no_norm, raw_no, year):
+    """
+    The unique identity of one bill. house is lowercased because a question
+    arrives lowercased and the CSV holds "Lok Sabha".
+
+    When the number will not normalise, the raw string is used instead, so a
+    bill is never lost for having an unusual number.
+    """
+    h = str(house or "").strip().casefold()
+    y = str(year or "").strip()
+    n = bill_no_norm
+    if n is None or n == "":
+        n = str(raw_no or "").strip().casefold()
+    return (h, str(n), y)
+
 
 # Bill-title short names people actually type -> words the title search understands.
 ALIASES = {
@@ -48,6 +153,8 @@ ALIASES = {
     "bnss": "bharatiya nagarik suraksha sanhita 2023",
     "bsa": "bharatiya sakshya 2023",
     "triple talaq": "muslim women protection of rights on marriage 2019",
+    "rbi": "reserve bank of india",
+    "pocso": "protection of children from sexual offences",
 }
 
 TITLE_NOISE = {"the", "bill", "of", "and", "a", "an", "in", "for", "to", "act",
@@ -67,16 +174,80 @@ QUERY_NOISE = TITLE_NOISE | {
     "hua", "ka", "ki", "ke", "i", "want", "know", "say", "said", "has",
     "have", "had", "there", "any", "type", "notified", "gazette", "enacted",
     "act", "number", "no", "yes", "then", "also", "and", "or", "whether",
+    # ---- question VERBS. These are the words a question adds AROUND a title,
+    # and they are the whole bug: the resolver asks that EVERY question token
+    # appear in the bill title, so one verb this set did not know about broke
+    # title resolution completely. "How was the University of Allahabad Bill,
+    # 2004 proposed?" resolved to NOTHING, because "proposed" is not in that
+    # title -- the bot then could not answer a question that named its bill in
+    # full.
+    #
+    # ONLY words that appear in ZERO bill titles may go here. Measured against
+    # this corpus: "amendment" is in 2,319 titles, "state" in 120, "provision"
+    # in 34. Adding any of those makes the resolver too loose and it starts
+    # returning the wrong bill -- which is how this list first went wrong.
+    "proposed", "propose", "proposal", "proposing", "rejected", "reject",
+    "rejecting", "negatived", "negativing", "blocked", "blocking", "defeated",
+    "approved", "approve", "tabled", "brought", "mover",
+    "ask", "asked", "asking", "mean", "meaning", "definition", "define",
+    "defined", "fine", "imprisonment", "clause",
+    "says", "stated", "cover", "covers", "covered", "seek", "seeks", "sought",
+    "aim", "aims", "purpose", "object", "background",
 }
+# Words that mean "read the TEXT and tell me what is in it". If any of these
+# is in the question it is not a metadata question, no matter which fact words
+# also appear. "What does X say about the ministry?" contains "ministry" but is
+# asking what the bill SAYS, not which ministry moved it.
+# Words that mean "read the TEXT and tell me what is in it". If any of these
+# is in the question it is not a metadata question, no matter which fact words
+# also appear. "What does X say about the ministry?" contains "ministry" but is
+# asking what the bill SAYS, not which ministry moved it.
+#
+# EVERY entry here was measured against the corpus first, and this list is the
+# reason the rule exists: "section" appears in 639 bill titles, "provision" in
+# 114, "punishment" in 7, "cover" in 11, "means" in 4, "clause" in 2. Using any
+# of those as a marker defers "When was the Delhi Laws (Special Provisions)
+# Bill, 2006 passed?" - the title itself carries the marker - and the bot stops
+# answering a question it used to answer. Multi-word phrases are safe because
+# no title contains them.
+#
+# A marker is only NEEDED when a question carries both a fact word and a
+# content word. Where no fact word matches at all, fact() returns None anyway,
+# so single words that are title words were dropped rather than kept.
+CONTENT_MARKERS = (
+    "say about", "says about", "said about", "state about", "states about",
+    "what does it say", "what does the bill say", "what does this say",
+    "prescribe", "prescribes", "provide for", "provides for",
+    "contain", "contains", "imprison", "explain", "describe", "definition",
+    "covers", "objects and reasons", "what is the object", "what happens if",
+    "why was", "how does",
+)
+
 FACT_WORDS = {  # field -> trigger words/phrases (matched on the lowercase question)
-    "by": ("who introduced", "introduced by", "mover", "sponsor", "who moved"),
+    # "how was it proposed" / "who proposed it" are the same fact as "who
+    # introduced it" -- the mover. A user asking how a bill was PROPOSED is
+    # asking who moved it, not for the clause text, so these belong here.
+    "by": ("who introduced", "introduced by", "mover", "sponsor", "who moved",
+           "who proposed", "proposed by", "how was it proposed", "how proposed",
+           "who brought", "brought by", "who tabled", "tabled by",
+           "who is the author", "moved by"),
     "ministry": ("ministry", "minister", "department"),
-    "assent": ("assent", "became law", "become law", "act number", "act no",
-               "enacted", "notified", "gazette", "into law", "received assent"),
+    # "become an act" was missing: "When did X become an Act?" fell through to
+    # the text search and came back with nothing.
+    "assent": ("assent", "became law", "become law", "became an act",
+               "become an act", "act number", "act no", "enacted", "notified",
+               "gazette", "into law", "received assent", "turned into law",
+               "signed into law", "president signed"),
     "committee": ("committee", "referred", "jpc", "select committee"),
     "type": ("government or private", "private member", "type of bill", "what type"),
+    # "rejected" was missing, which is the single most natural way to ask
+    # whether a bill failed. "Is the X Bill rejected?" fell straight through
+    # to the text search. In this data a rejected bill is "Negatived".
     "status": ("status", "pending", "lapsed", "withdrawn", "what happened",
-               "current state", "where is"),
+               "current state", "where is", "rejected", "reject", "negatived",
+               "negatived", "blocked", "defeated", "thrown out", "killed",
+               "did it pass", "did it fail", "was it passed", "was it rejected",
+               "did it become law", "approved", "still pending", "in progress"),
 }
 CARD_WORDS = ("everything", "all details", "full details", "complete details",
               "timeline", "journey", "history", "profile", "progress",
@@ -177,23 +348,63 @@ def find_csv(path=None):
     return None
 
 
+class _ThreadConnection:
+    def __init__(self, connection):
+        self.connection = connection
+        weakref.finalize(self, connection.close)
+
+
 class BillsDB:
     def __init__(self, csv_path):
+        self.csv_path = os.path.abspath(csv_path)
+        self.raw_groups = {}
         self.bills = []
         with open(csv_path, encoding="utf-8-sig", newline="") as f:
             for r in csv.DictReader(f):
                 self.bills.append(self._row(r))
-        self.by_key = {(b["no"], b["year"]): b for b in self.bills}
+        # THE identity index: (house, bill_number_norm, year). The house is in
+        # it because normalising is what makes Lok Sabha Bill 10 and Rajya Sabha
+        # Bill X both become 10 - 1,289 such pairs exist in this corpus, so an
+        # index without the house would silently return one house's bill for a
+        # question about the other's.
+        self.by_key = {norm_key(b["house"], b["norm"], b["no"], b["year"]): b
+                       for b in self.bills}
+        # A bill whose number will not normalise (very rare) still needs a
+        # lookup, so its raw lowercased string is indexed too. norm_key already
+        # falls back to the raw string, so this is the same key.
+        self.by_key_ci = {(b["no"].casefold(), b["year"]): b for b in self.bills}
+        # Everything a given (norm, year) points at, split by house. This is
+        # what lets the bot say "that number exists in both houses" instead of
+        # quietly picking one.
+        self.by_numyear = {}
+        for b in self.bills:
+            self.by_numyear.setdefault((str(b["norm"]), b["year"]), []).append(b)
         for b in self.bills:
             b["toks"] = set(tokens(b["title"], TITLE_NOISE))
             # a bill can be introduced in one year but titled with the next ("... Bill, 2021"
             # numbered 156 of 2019), so a year in the question may match either.
             b["title_years"] = set(YEAR.findall(b["title"].lower()))
+        # How fresh this table is, stated as a fact rather than a claim. A bill
+        # introduced after the day the metadata was fetched cannot be in it, so
+        # the newest introduction date IS the data's as-of date - and the app
+        # shows it, instead of letting "covers 2004-2026" imply "up to today".
+        intro = [b.get("intro") for b in self.bills]
+        intro = [d for d in intro if d]
+        self.data_as_of = max(intro).isoformat() if intro else ""
         self.vocab = sorted({t for b in self.bills for t in b["toks"] if len(t) > 3})
         self.ministries = sorted({b["ministry"].lower() for b in self.bills if b["ministry"]},
                                  key=len, reverse=True)
         self.statuses = {b["status"].lower(): b["status"] for b in self.bills if b["status"]}
-        self.db = self._sqlite()
+        for bill in self.bills:
+            self.raw_groups.setdefault((bill['no'].casefold(),bill['year']), []).append(bill)
+        self._sql_local = threading.local()
+
+    @property
+    def db(self):
+        # Never hand an SQLite connection created on one Streamlit thread to another.
+        if not hasattr(self._sql_local, 'db'):
+            self._sql_local.db = _ThreadConnection(self._sqlite())
+        return self._sql_local.db.connection
 
     # ---------- loading ----------
     @staticmethod
@@ -204,10 +415,27 @@ class BillsDB:
                 "passed-by-both text": g("billPassedInBothHousesFile"),
                 "gazette (Act text)": g("billGazettedFile"), "committee report": g("reportFile"),
                 "synopsis": g("billSynopsisFile"), "errata": g("errataFile")}
-        return {"no": g("billNumber"), "year": g("billYear"), "title": g("billName"),
+        # "norm" is the integer form of the bill number, written by
+        # download_bills.py. "no" keeps the OFFICIAL string, which for a Rajya
+        # Sabha bill is Roman and is what the user must be shown.
+        raw_no = g("billNumber")
+        _raw, norm = normalize_bill_number(raw_no)
+        return {"no": raw_no, "norm": norm,
+                "year": g("billYear"), "title": g("billName"),
                 "type": g("billType"), "category": g("billCategory"),
-                "ministry": g("ministryName"), "house": g("billIntroducedInHouse"),
-                "by": g("billIntroducedBy"), "intro": parse_date(g("billIntroducedDate")),
+                "ministry": g("ministryName"),
+                # Prefer the canonical "house" column that download_bills.py
+                # writes, and fall back to billIntroducedInHouse (present on
+                # every legacy row, and what the older index had). The two
+                # agree on the current index because repair_legacy() derives
+                # one from the other, but they are not the same field: if the
+                # canonical column is ever missing or blank, the house - and
+                # with it every house-specific resolution - must not go blank.
+                "house": g("house") or g("billIntroducedInHouse"),
+                "by": g("billIntroducedBy"),
+                "source_primary": g("source_primary"),
+                "filled_from": g("filled_from"),
+                "intro": parse_date(g("billIntroducedDate")),
                 "ls": parse_date(g("billPassedInLSDate")), "rs": parse_date(g("billPassedInRSDate")),
                 "cmte": parse_date(g("referredToCommitteeDate")),
                 "report": parse_date(g("reportPresentedDate")), "assent": parse_date(g("billAssentedDate")),
@@ -215,20 +443,27 @@ class BillsDB:
                 "docs": [k for k, v in docs.items() if v]}
 
     def _sqlite(self):
-        db = sqlite3.connect(":memory:")
+        # Queries are still thread-local. Allow the finalizer to close an abandoned
+        # thread's private handle even if its owning UI thread has ended.
+        db = sqlite3.connect(":memory:", check_same_thread=False)
         # The four *_m columns hold the year and month as "YYYY-MM" so a
         # question like "how many bills were introduced this month" can be
         # answered exactly. Without them only whole years could be counted.
+        # `house` is the LAST column on purpose: every query names its columns
+        # explicitly, so appending cannot disturb any of them. Without it there
+        # is no way to answer "how many Rajya Sabha bills" at all.
         db.execute("CREATE TABLE bills(no TEXT, year TEXT, title TEXT, type TEXT, category TEXT,"
                    " ministry TEXT, intro TEXT, ls TEXT, rs TEXT, assent TEXT, status TEXT,"
-                   " intro_m TEXT, ls_m TEXT, rs_m TEXT, assent_m TEXT)")
+                   " intro_m TEXT, ls_m TEXT, rs_m TEXT, assent_m TEXT, house TEXT, number_sort INTEGER)")
         iso = lambda d: d.isoformat() if d else None
         ym = lambda d: d.strftime("%Y-%m") if d else None
-        db.executemany("INSERT INTO bills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        db.executemany("INSERT INTO bills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        [(b["no"], b["year"], b["title"], b["type"], b["category"], b["ministry"],
                          iso(b["intro"]), iso(b["ls"]), iso(b["rs"]), iso(b["assent"]), b["status"],
-                         ym(b["intro"]), ym(b["ls"]), ym(b["rs"]), ym(b["assent"]))
+                         ym(b["intro"]), ym(b["ls"]), ym(b["rs"]), ym(b["assent"]), b["house"],
+                         int(b["norm"]) if b["norm"] is not None else 2147483647)
                         for b in self.bills])
+        db.commit()
         return db
 
     def export(self, path):
@@ -255,25 +490,160 @@ class BillsDB:
         for k, v in ALIASES.items():
             q = re.sub(rf"\b{re.escape(k)}\b", v, q)
         years = YEAR.findall(q)
+        mh = HOUSE_BILL.search(q)
+        want_house = (("rajya sabha" if mh.group(1) == "rajya" else "lok sabha") if mh else None)
         # "Bill No. 370 of 2019" / "bill 370/2019" / "370/2019". Needs the word "bill" BEFORE
         # the number, so a title like "Appropriation (No.3) Bill" is not misread as Bill No. 3.
+        # A bill number is DIGITS (Lok Sabha 1..999) or a ROMAN NUMERAL
+        # (Rajya Sabha I..LXXXVIII, plus the Lok Sabha C-series). The old
+        # pattern was (\d{1,3}) only, so "Bill No. I of 2004" matched NOTHING
+        # and fell through to the title search, which cannot find it either.
+        # The bot could not identify any of the 1,491 Rajya Sabha bills by
+        # number - the single worst gap in the whole system, because the
+        # Rajya Sabha is 29% of the corpus.
         m = re.search(r"\bbill\s*(?:no\.?|number|num\.?)?\s*(\d{1,3})\b"
-                      r"(?:\s*(?:of|/|,|\(|-)\s*(20[0-2]\d))?", q) or \
-            re.search(r"\b(\d{1,3})\s*/\s*(20[0-2]\d)\b", q)
+                      r"(?:\s*(?:of|/|,|\(|-)\s*(20[0-2]\d))?", q)
+        if not m:
+            # A bare Roman numeral is only read as a bill number when the
+            # YEAR is there too, or when "no." said so explicitly above.
+            # Without that guard, "the bill I introduced yesterday" would read
+            # "I" as Bill No. I and answer about the wrong law entirely.
+            # "no."/"number" is optional here too, because the common phrasing
+            # is "Bill No. I of 2004" - with the words in it.
+            m = re.search(r"\bbill\s*(?:no\.?|number|num\.?)?\s*"
+                          r"([ivxlcdm]{1,8})\s*(?:of|/|,)\s*(20[0-2]\d)\b", q)
+        if not m:
+            m = re.search(r"\b([ivxlcdm]{1,8})\s*/\s*(20[0-2]\d)\b", q)
         if m:
-            no, yr = m.group(1), (m.group(2) if m.lastindex and m.lastindex >= 2 else None)
+            no = m.group(1).upper() if m.group(1).isalpha() else m.group(1)
+            yr = (m.group(2) if m.lastindex and m.lastindex >= 2 else None)
             yr = yr or (years[-1] if years else None)
             if yr:
-                b = self.by_key.get((no, yr))
+                want_house = None
+                mh = HOUSE_BILL.search(q)
+                if mh:
+                    want_house = "rajya sabha" if mh.group(1) == "rajya" \
+                        else "lok sabha"
+                _raw, nrm = normalize_bill_number(no)
+
+                # (1) EXACT official number first, but ONLY when the question
+                #     spelled the number in a non-Arabic form. "Bill XXXVIII of
+                #     2018" is the Rajya Sabha bill's own number spelled the way
+                #     Parliament spells it, so an exact match is the strongest
+                #     signal there is - it is not a guess. This is also what
+                #     keeps an explicitly Roman question resolving to one bill:
+                #     without it, XXXVIII normalises to 38 and collides with Lok
+                #     Sabha Bill 38 of the same year.
+                #     The same is true of an ARABIC number, and this is measured,
+                #     not assumed: of the 1,289 (number, year) pairs that BOTH
+                #     houses hold, the Arabic spelling is the Lok Sabha bill in
+                #     1,289 of them and the Roman spelling the Rajya Sabha bill
+                #     in 1,289 of them - never the other way round. So the form
+                #     the user typed is a complete disambiguator, and matching it
+                #     exactly is evidence, not a coin toss.
+                # The house named in the question outranks everything: asking
+                # about "Rajya Sabha Bill 38" and being shown the Lok Sabha
+                # bill is answering about the wrong law, however exact the
+                # number match was.
+                exact = [b for b in self.bills
+                         if b["year"] == yr
+                         and str(b["no"]).strip().casefold() == str(no).casefold()
+                         and (want_house is None
+                              or str(b["house"] or "").strip().casefold() == want_house)]
+                if len(exact) == 1:
+                    # The spelling decides when both houses hold the number, but
+                    # the TITLE must still be able to override it: a question
+                    # naming the other house's bill by its title, with this
+                    # number, is a real ambiguity, not a request for this bill.
+                    if want_house is None:
+                        group = self.by_numyear.get((str(nrm), yr), [])
+                        if len({g["house"] for g in group}) > 1:
+                            words = set(tokens(q, QUERY_NOISE))
+                            others = [g for g in group if g is not exact[0]]
+                            chosen = exact[0]
+                            best = max(others, key=lambda g: len(words & g["toks"]))
+                            mine = len(words & chosen["toks"])
+                            theirs = len(words & best["toks"])
+                            # One shared word ("Bill") is not evidence; a title
+                            # that fits the other house's bill far better is.
+                            if theirs >= 2 and theirs >= mine + 2:
+                                return {"kind": "many", "bills": [chosen, best],
+                                        "others": [], "why": "both houses"}
+                    return {"kind": "one", "bills": exact, "others": []}
+                if len(exact) > 1:
+                    return {"kind": "many", "bills": exact, "others": [],
+                            "why": "both houses"}
+
+                # (2) NORMALISED. This is the bridge: "Bill 38 of 2018" can now
+                #     reach Rajya Sabha Bill XXXVIII of 2018, which used to be
+                #     unreachable because the strings never matched.
+                hits = [b for b in self.by_numyear.get((str(nrm), yr), [])
+                        if want_house is None
+                        or str(b["house"] or "").strip().casefold() == want_house]
+                if len(hits) == 1:
+                    return {"kind": "one", "bills": hits, "others": []}
+                if len(hits) > 1:
+                    # Same number, same year, BOTH houses. Answering would mean
+                    # answering about the wrong law, so the caller is told and
+                    # shows both. 1,289 such pairs exist in this corpus.
+                    return {"kind": "many", "bills": hits, "others": [],
+                            "why": "both houses"}
+
+                # (3) A number that will not normalise at all.
+                b = self.by_key_ci.get((no.casefold(), yr))
+                if b and want_house and b['house'].strip().casefold() != want_house:
+                    b = None
                 return {"kind": "one", "bills": [b], "others": []} if b else \
                     {"kind": "none", "bills": [], "others": [], "why": f"no Bill No. {no} of {yr}"}
-            same = [b for b in self.bills if b["no"] == no]
+            same = [b for b in self.bills if b['no'].casefold() == no.casefold()
+                    and (not want_house or b['house'].strip().casefold() == want_house)]
             return {"kind": "many", "bills": same, "others": []} if same else \
                 {"kind": "none", "bills": [], "others": []}
+        # A question that only points back - "this bill", "it", "the same
+        # bill" - is answered by the bill the previous question resolved to.
+        #
+        # This runs BEFORE the title search on purpose. It used to run after,
+        # so "what are all clauses for this bill?" was first matched against
+        # every bill whose title contains "clauses" - the two General Clauses
+        # (Amendment) Bills - and answered about the wrong law. Muting
+        # "clauses"/"general" in QUERY_NOISE would have fixed that one example
+        # and broken real title questions, so the ORDER is what changed.
+        #
+        # It is safe because a question that names its own bill also names a
+        # year, a house or a bill number, and any of those disables this path.
+        pronoun_points_back = (
+            set(re.findall(r"[a-z]+", q)) & PRONOUNS
+            and not years and not want_house
+            and not re.search(r"\bbill\s*(?:no\.?|number|num\.?)?\s*[\divxlcdm]{1,8}\b", q))
+        if pronoun_points_back:
+            if last_filters and last_filters[0] and last_filters[1]:
+                # last_filters is (year, no, house). Build the key exactly the
+                # way by_key was built: norm_key(house, norm, year), a 3-tuple.
+                # An older lookup used by_key.get((no, year)) - a 2-tuple
+                # against a 3-tuple index - so it could never match.
+                _raw, nrm = normalize_bill_number(last_filters[1])
+                prev_house = last_filters[2] if len(last_filters) > 2 else None
+                b = self.by_key.get(norm_key(prev_house, nrm, last_filters[1], last_filters[0]))
+                if b is None and not prev_house:      # never cross an explicit House
+                    b = self.by_key_ci.get((str(last_filters[1]).casefold(),
+                                            str(last_filters[0])))
+                if b:
+                    return {"kind": "one", "bills": [b], "others": []}
+            # A pointing-back question with NO bill in hand must not fall
+            # through to the title search either: "what are all clauses for
+            # this bill?" would otherwise list the General Clauses (Amendment)
+            # Bills - a confident answer about the wrong law. Measured safe:
+            # no real title contains it/its/this/that/same/itself as a whole
+            # word (0 of the 5,169 titles do), so nothing legitimate is lost
+            # by stopping here.
+            return {"kind": "none", "bills": [], "others": [],
+                    "why": "the question points back at a bill, but no bill has been named yet"}
+
         qt = self._fix_typos(tokens(q, QUERY_NOISE))
         if qt:
             pool = [b for b in self.bills
-                    if not years or b["year"] == years[-1] or years[-1] in b["title_years"]]
+                    if (not years or b["year"] == years[-1] or years[-1] in b["title_years"])
+                    and (not want_house or b['house'].strip().casefold() == want_house)]
             qs = set(qt)
             cand = [b for b in pool if qs <= b["toks"]]
             if cand:
@@ -283,10 +653,34 @@ class BillsDB:
                 if len(cand) == 1 or top - second >= 0.15:
                     return {"kind": "one", "bills": [cand[0]], "others": cand[1:4]}
                 return {"kind": "many", "bills": cand, "others": []}
-        if set(re.findall(r"[a-z]+", q)) & PRONOUNS and last_filters and all(last_filters):
-            b = self.by_key.get((str(last_filters[1]), str(last_filters[0])))
-            if b:
-                return {"kind": "one", "bills": [b], "others": []}
+            # A CONTENT question carries words the title never had. "What
+            # punishment does the BNS prescribe for murder?" asks about murder,
+            # and no bill is titled Murder - so the subset test above fails on
+            # every content question and the bill cannot be named at all. That
+            # is why those questions came back "I could not find a bill in my
+            # data". Score the other way round instead: how much of the TITLE
+            # does the question cover? "bharatiya nyaya sanhita" sits whole
+            # inside that question, which is enough to name the bill, and the
+            # question's own words are simply not part of the test.
+            #
+            # Two guards, because coverage alone is a loose test. The title must
+            # hold at least two words and at least two of them must be present,
+            # so a one-word title cannot be claimed by a single stray word.
+            scored = sorted(
+                ((len(qs & b["toks"]) / len(b["toks"]), b)
+                 for b in pool
+                 if len(b["toks"]) >= 2 and len(qs & b["toks"]) >= 2),
+                key=lambda x: -x[0])
+            scored = [(c, b) for c, b in scored if c >= 0.8]
+            if scored:
+                top = scored[0][0]
+                same = [b for c, b in scored if c >= top - 0.15]
+                if len(same) == 1:
+                    return {"kind": "one", "bills": [same[0]],
+                            "others": [b for _c, b in scored[1:4]]}
+                # Two bills share the title - 173 and 121 of 2023 both are the
+                # Bharatiya Nyaya Sanhita. Say so and let the caller pick.
+                return {"kind": "many", "bills": same, "others": []}
         return {"kind": "none", "bills": [], "others": []}
 
     # ---------- answering ONE bill ----------
@@ -309,7 +703,12 @@ class BillsDB:
         return f
 
     def _head(self, b):
-        return f"**{b['title']}** (Bill No. {b['no']} of {b['year']})"
+        # The house is in the heading because the same bill number means
+        # different laws in the two houses, and "Bill No. I of 2004" looks
+        # identical whether it came from the Lok Sabha or the Rajya Sabha. A
+        # reader who is checking an answer needs to see which one it was.
+        return (f"**{b['title']}** (Bill No. {b['no']} of {b['year']}"
+                + (f", {b['house']}" if b["house"] else "") + ")")
 
     def card(self, b):
         n = lambda d, empty="not recorded": fmt(d) or empty
@@ -318,7 +717,7 @@ class BillsDB:
                  f"{b['category'] or '?'} · Ministry: {b['ministry'] or 'not recorded'}",
                  "", "**Timeline**",
                  f"- Introduced ({b['house'] or 'house not recorded'}): {n(b['intro'])}"
-                 + (f" by {b['by']}" if b["by"] else ""),
+                 + (f" — {conflict_note(b)}" if conflict_note(b) else (f" (metadata: {b['by']})" if b['by'] else "")),
                  f"- Referred to committee: {n(b['cmte'], 'not referred / not recorded')}",
                  f"- Committee report presented: {n(b['report'], 'none recorded')}",
                  f"- Passed by Lok Sabha: {n(b['ls'])}", f"- Passed by Rajya Sabha: {n(b['rs'])}",
@@ -331,15 +730,35 @@ class BillsDB:
 
     def fact(self, b, q):
         """Lines for exactly the fields asked. None if the question isn't a fact question."""
+        # A question about the TEXT is never a metadata question, however many
+        # fact words it happens to contain. Without this guard, "What does Bill
+        # 370 of 2019 say about the ministry?" was answered "Ministry: HOME
+        # AFFAIRS" - a real answer to a question that was not asked. Checked
+        # first, so it beats every FACT_WORDS match below.
+        if any(w in q for w in CONTENT_MARKERS):
+            return None
         has = lambda words: any(w in q for w in words)
         want = [k for k, w in FACT_WORDS.items() if has(w)]
+        if asks_person(q) and 'by' not in want:
+            want.insert(0, 'by')
         passed = bool(re.search(r"\bpass(ed|es)?\b", q))
         if "rajya" in q and passed:
             want.append("rs")
         if "lok sabha" in q and passed:
             want.append("ls")
         if passed and "rs" not in want and "ls" not in want:
-            want += ["ls", "rs"]
+            # Report the bill's OWN house first. Leading a Rajya Sabha bill
+            # with "No Lok Sabha passing date is recorded" reads as "it was
+            # never passed", when the truth is simply that this bill belongs
+            # to the other house. Order is what fixes that, not wording.
+            own = "rs" if "rajya" in (b["house"] or "").lower() else "ls"
+            want += [own] + [h for h in ("ls", "rs") if h != own]
+        # "How was the X Bill proposed?" asks the same fact as "who moved it".
+        # A substring check cannot see it, because the words sit either side
+        # of the bill's name, so this is a pattern rather than a phrase.
+        if (re.search(r"\bhow\s+(was|were|is|did)\b[^?]*\bpropos", q)
+                or re.search(r"\bwho\s+\w*\s*propos", q)) and "by" not in want:
+            want.append("by")
         if re.search(r"\b(introduc\w*|moved|brought|tabled)\b", q) and "by" not in want:
             want.append("intro")
         out = []
@@ -348,11 +767,16 @@ class BillsDB:
                 out.append(f"Introduced in {b['house'] or 'the house'} on {fmt(b['intro'])}." if b["intro"]
                            else "No introduction date is recorded.")
             elif k == "ls":
-                out.append(f"Passed by Lok Sabha on {fmt(b['ls'])}." if b["ls"] else
-                           f"No Lok Sabha passing date is recorded (status: {b['status'] or 'unknown'}).")
+                if b["ls"]:
+                    out.append(f"Passed by Lok Sabha on {fmt(b['ls'])}.")
+                else:
+                    out.append(f"No Lok Sabha passing date is recorded (status: "
+                               f"{b['status'] or 'unknown'}).")
             elif k == "rs":
-                out.append(f"Passed by Rajya Sabha on {fmt(b['rs'])}." if b["rs"] else
-                           "No Rajya Sabha passing date is recorded.")
+                if b["rs"]:
+                    out.append(f"Passed by Rajya Sabha on {fmt(b['rs'])}.")
+                else:
+                    out.append("No Rajya Sabha passing date is recorded.")
             elif k == "assent":
                 out.append(f"Presidential assent on {fmt(b['assent'])}"
                            + (f" (Act No. {b['act_no']} of {b['act_year']})." if b["act_no"] else ".")
@@ -366,7 +790,7 @@ class BillsDB:
                 out.append(f"Ministry: {b['ministry']}." if b["ministry"] else "No ministry is recorded "
                            "(common for private member bills).")
             elif k == "by":
-                out.append(f"Introduced by {b['by']}." if b["by"] else "The mover is not recorded in the data.")
+                out.append(recorded_by(b))
             elif k == "type":
                 out.append(f"It is a {b['type']} bill ({b['category'] or 'category not recorded'}).")
             elif k == "status":
@@ -388,15 +812,49 @@ class BillsDB:
             body += "\n\nOther close matches: " + "; ".join(
                 f"{o['title']} (No. {o['no']}/{o['year']})" for o in res["others"][:3]) + \
                 " - name the bill number if you meant another."
-        return body + "\n\n" + SRC_LINE
+        return body + "\n\n" + metadata_source_line(b)
 
-    def many(self, res):
+    def many(self, res, question=""):
         bl = res["bills"]
+        mh = re.search(r"\b(lok|rajya)\s+sabha\b", question or "", re.I)
+        if mh:
+            wanted = mh.group(1).casefold() + " sabha"
+            if not any(b["house"].strip().casefold() == wanted for b in bl):
+                return (f"No {'Lok' if wanted.startswith('lok') else 'Rajya'} Sabha bill "
+                        f"numbered {bl[0]['no']} of {bl[0]['year']} is in this data, so I will "
+                        "not substitute another bill. The same number/year exists in: "
+                        + ", ".join(sorted({b['house'] for b in bl})) + ".")
         lines = [f"- {b['title']} - Bill No. {b['no']} of {b['year']} ({b['type']}, {b['status'] or '?'})"
                  for b in bl[:8]]
         more = f"\n...and {len(bl) - 8} more." if len(bl) > 8 else ""
-        return (f"I found {len(bl)} bills that match, so I won't guess:\n" + "\n".join(lines) + more +
-                "\n\nTell me the year or the bill number (e.g. \"Bill No. 370 of 2019\").")
+        head = f"I found {len(bl)} bills that match, so I won't guess:\n"
+        # Two different houses can hold the SAME number in the same year - the
+        # Rajya Sabha numbers its bills I, II, III ... and the Lok Sabha
+        # numbers its own 1, 2, 3 ..., so "Bill No. 38 of 2018" is really two
+        # different laws. Telling the user to supply a year or a number they
+        # already gave is a dead end; tell them the one thing that separates
+        # the two.
+        if res.get("why") == "both houses":
+            houses = " and ".join(dict.fromkeys(
+                b["house"] for b in bl if b.get("house")))
+            tail = (f"\n\nBoth the {houses} have a bill with that number for that "
+                    f"year. Tell me which one you mean (e.g. \"Rajya Sabha Bill No. "
+                    f"{bl[-1]['no']} of {bl[-1]['year']}\").")
+        else:
+            # Ask for the ONE thing that actually separates the bills shown. If
+            # they all share a year - "When was BNS passed?" is two different
+            # Bharatiya Nyaya Sanhita bills, both of 2023 - then asking for the
+            # year is a dead end: the user already gave it. Ask for the number
+            # instead, which is what the list above just showed them.
+            years = {b["year"] for b in bl}
+            if len(years) == 1:
+                tail = ("\n\nThese are all from " + bl[0]["year"] + ". Tell me "
+                        "the bill number (e.g. \"Bill No. "
+                        + bl[0]["no"] + " of " + bl[0]["year"] + "\").")
+            else:
+                tail = ("\n\nTell me the year or the bill number (e.g. "
+                        "\"Bill No. 370 of 2019\").")
+        return head + "\n".join(lines) + more + tail
 
     # ---------- MANY bills: counts and lists ----------
     def only_metadata_words(self, q):
@@ -436,6 +894,24 @@ class BillsDB:
             return False
         return True
 
+    def metadata_source_summary(self):
+        """Describe the provenance recorded in this metadata CSV, without assuming it."""
+        counts = {"sansad": 0, "rti": 0, "unknown": 0}
+        for bill in self.bills:
+            source = str(bill.get("source_primary") or "").strip().lower()
+            if source in ("sansad", "rti"):
+                counts[source] += 1
+            else:
+                counts["unknown"] += 1
+        parts = []
+        if counts["sansad"]:
+            parts.append(f"{counts['sansad']} Sansad-primary records")
+        if counts["rti"]:
+            parts.append(f"{counts['rti']} RTI Wiki-primary records (secondary source)")
+        if counts["unknown"]:
+            parts.append(f"{counts['unknown']} records with source provenance not recorded")
+        return "_Metadata provenance: " + "; ".join(parts) + ". Verify bill details against Sansad._"
+
     def aggregate(self, question):
         q = question.lower()
         toks = set(TOKEN.findall(q))
@@ -455,7 +931,12 @@ class BillsDB:
             return None
         where, args, said = ["1=1"], [], []
         metric = "year"  # introduced year by default
-        if re.search(r"assent|became law|become law|enacted|into law", q):
+        # "became Acts" / "became law" / "enacted" / "into law" all mean the
+        # same thing here: count by ASSENT date. "became acts" was missing, so
+        # "How many bills of 2004 became Acts?" fell through to the default
+        # year metric and answered 103 - the total - instead of 31.
+        if re.search(r"assent|became?\s+(?:law|acts?)|become\s+(?:law|acts?)"
+                     r"|enacted|into\s+(?:law|acts?)", q):
             metric, said = "assent", ["by assent date"]
         elif "rajya sabha" in q and re.search(r"pass", q):
             metric, said = "rs", ["by Rajya Sabha passing date"]
@@ -527,6 +1008,19 @@ class BillsDB:
         if "money bill" in q:
             where.append("category LIKE '%Money%'")
             said.append("money bills")
+        # "Rajya Sabha bills" names the house the bill came FROM. "bills passed
+        # by the Rajya Sabha" names the house that PASSED it - a different
+        # question, and one a Lok Sabha bill routinely satisfies, so it is not
+        # narrowed here. Same rule as the resolver: the house only counts when
+        # it sits directly in front of the word "bill". Without this,
+        # "how many Rajya Sabha bills in 2004" answered with the total for the
+        # year, both houses together.
+        mh = HOUSE_BILL.search(q)
+        if mh:
+            want = "Rajya Sabha" if mh.group(1) == "rajya" else "Lok Sabha"
+            where.append("house = ?")
+            args.append(want)
+            said.append("%s bills" % want)
         w = " AND ".join(where)
         total = self.db.execute(f"SELECT COUNT(*) FROM bills WHERE {w}", args).fetchone()[0]
         basis = "counted by introduction year" if metric == "year" else said[0]
@@ -542,20 +1036,20 @@ class BillsDB:
                 have = self.db.execute(
                     f"SELECT COUNT(*) FROM bills WHERE {dcol} IS NOT NULL").fetchone()[0]
                 out += (f"\n\nThat counts only the **{have}** bills in the corpus that "
-                        f"have a {dcol.upper()} date at all.")
+                        f"have a recorded {dcol.upper()} date at all.")
             if rng and total:
                 rows = self.db.execute(f"SELECT {col}, COUNT(*) FROM bills WHERE {w} "
                                        "GROUP BY 1 ORDER BY 1", args).fetchall()
                 out += "\n\nBy year: " + ", ".join(f"{y}: {c}" for y, c in rows)
         else:
-            rows = self.db.execute(f"SELECT title, no, year, status FROM bills WHERE {w} "
-                                   "ORDER BY year, CAST(no AS INTEGER) LIMIT 12", args).fetchall()
+            rows = self.db.execute(f"SELECT title, no, year, status, house FROM bills WHERE {w} "
+                                   "ORDER BY year, house, number_sort, no LIMIT 12", args).fetchall()
             out = f"**{total} bills** match ({crit}; {basis})." + \
-                  ("\n\n" + "\n".join(f"- {t} - Bill No. {n} of {y} ({s})" for t, n, y, s in rows)
+                  ("\n\n" + "\n".join(f"- {t} - Bill No. {n} of {y} ({h or 'house not recorded'}, {s})" for t, n, y, s, h in rows)
                    if rows else "")
             if total > 12:
                 out += f"\n...showing 12 of {total}. Add a year, type or ministry to narrow it."
-        return out + "\n\n" + SRC_LINE
+        return out + "\n\n" + self.metadata_source_summary()
 
     # ---------- name to bill number (the resolver) ----------
     def find_by_title(self, name, year=None):
@@ -657,7 +1151,9 @@ def main():
         print(db.answer(a.ask)[0] or "(not a facts question -> would go to RAG)")
     if a.selftest:
         import bills_db_selftest
-        bills_db_selftest.run(db)
+        failures = bills_db_selftest.run(db)
+        if failures:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

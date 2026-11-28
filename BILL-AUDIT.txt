@@ -1,0 +1,27 @@
+BILL AUDIT - every bill, four standard questions
+generated: 2026-11-27 02:43
+csv: D:\PRJ1(Parliament)\bills-chatbot\bills_data\bills_metadata.csv
+
+== INVENTORY ==
+bills: 5,169
+   3,678  Lok Sabha
+   1,491  Rajya Sabha
+   4,004  Private Member bills
+   1,165  Government bills
+
+== READABILITY (can it answer CLAUSE questions, not just dates) ==
+  bills with text in the brain : 4,589
+  bills with NO text           : 580 (Government 127, Private Member 453; Lok Sabha 367, Rajya Sabha 213)
+  -> these answer dates/status/introducer only, never clauses.
+     Reasons: no document downloaded, or a scanned PDF (NEEDS_OCR).
+     The row-level list is BILL-AUDIT-ALL.csv, column has_text = no.
+
+== QUESTION BATTERY ==
+  1. identity  (Tell me about...)        PASS  5,169   FAIL     0
+  2. who       (Who introduced...)       PASS  5,169   FAIL     0
+  3. status    (Is it <status>?)         PASS  5,156   FAIL     0, 13 skipped (field blank in CSV)
+  4. when      (When introduced?)        PASS  5,168   FAIL     0, 1 skipped (field blank in CSV)
+
+== FAILURES ==  none. Every bill answered all four questions correctly.
+
+Complete row-level record: BILL-AUDIT-ALL.csv

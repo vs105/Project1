@@ -1,0 +1,8 @@
+[theme]
+# Institutional document palette: ink text on paper, maroon accents.
+base = "light"
+primaryColor = "#7b1e26"
+backgroundColor = "#fbfaf7"
+secondaryBackgroundColor = "#f2efe8"
+textColor = "#1e2a3a"
+font = "serif"

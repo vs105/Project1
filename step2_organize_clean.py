@@ -42,6 +42,8 @@ import re
 import sys
 import unicodedata
 
+from bills_db import normalize_bill_number
+
 # ---------------------------------------------------------------- settings ---
 
 MIN_CHUNK_WORDS = 40      # shorter than this is noise (a heading, a page number)
@@ -99,12 +101,31 @@ NARRATIVE_MARKERS = [
 ]
 
 # A clause number at the start of a line, like "12." or "158B."
-CLAUSE_HEAD = re.compile(r"^\s*(\d{1,4}[A-Z]?)\.\s+(?=\S)", re.MULTILINE)
+# A clause starts at the beginning of a line with its number and a dot.
+# The separator used to have to be whitespace, but these bills really
+# are printed "1.(1)", "21.The Building and Works Committee" and
+# "34.(1) The first Statutes" - no space at all. The next character is
+# required to be a letter or an opening bracket rather than anything
+# non-space, so a figure like "3.14" is not read as clause 3.
+CLAUSE_HEAD = re.compile(r"^\s*(\d{1,4}[A-Z]?)\s*[.)]\s*(?=[A-Za-z(])",
+                        re.MULTILINE)
 
 # A chapter or schedule heading, like "CHAPTER XIV-B" or "SCHEDULE I"
+# A chapter or schedule heading. Measured on 44 real bills: the old pattern
+# required the word, ONE space, then a Roman numeral and nothing else, which
+# silently missed 15 of every 100 headings. The formats that were being lost
+# are the ones a PDF extractor actually produces:
+#     "CHAPTER-III"   hyphen and no space
+#     "Chapter."      a full stop instead of a space
+#     "Schedule;"     no numeral on the line at all
+#     "Chapter IIIA of"   the chapter title on the same line
+# Each one that was missed pushed a whole chapter's clauses into the chapter
+# before it, which is why the Juvenile Justice Bill reported Chapter III as
+# clauses 4-9 instead of 5-9. The word, the numeral and any title are now
+# separate groups so they can be normalised into one name.
 TERM_HEAD = re.compile(
-    r"^\s*(CHAPTER\s+[IVXLC]+[A-Z\-]*|SCHEDULE\s+[IVXLC]+)"
-    r"\s*[:\-]?\s*$",
+    r"^\s*(CHAPTER|SCHEDULE)[\s.:;\-]*([IVXLC]+[A-Z]?|\d+[A-Z]?)?[\s.:;\-]*"
+    r"((?!AND\b|OR\b|TO\b|THE\b|OF\b|THIS\b)[A-Z][A-Z ,'()\-]{0,70})?\s*$",
     re.IGNORECASE | re.MULTILINE)
 
 # ------------------------------------------------------------------- helpers --
@@ -285,7 +306,15 @@ def parse_operative(text):
     # be told which chapter it belongs to.
     terms = []
     for m in TERM_HEAD.finditer(text):
-        terms.append((m.start(), m.group(1).strip().upper()))
+        # The word, the numeral and any same-line title are separate groups,
+        # so "CHAPTER-III", "Chapter." and "CHAPTER  IV" all normalise to the
+        # same name. A heading with no numeral at all is kept as the bare
+        # word: it is still a chapter boundary, which is more honest than
+        # leaving the clause in the chapter before it.
+        num = (m.group(2) or "").upper()
+        title = " ".join((m.group(3) or "").split()).upper()
+        name = " ".join(x for x in (m.group(1).upper(), num, title) if x)
+        terms.append((m.start(), name))
 
     # A number between 1900 and 2100 followed by a full stop is a year in a page
     # footer, never a clause number. No bill has two thousand clauses. The
@@ -356,26 +385,26 @@ def find_label(text, start, end):
 
 
 def split_long_clause(clause, limit):
-    """
-    A clause longer than the limit is split at its own sub-clause letters
-    (a) (b) (c), never in the middle of a sentence. If it has no sub-clauses
-    it is left whole rather than butchered.
-    """
+    """Split long clauses at sub-clause boundaries without dropping any text."""
     body = clause["body"]
     if len(body.split()) <= limit:
         return [clause]
     marks = list(re.finditer(r"^\s*\(([a-z]{1,2})\)\s+", body, re.MULTILINE))
     if len(marks) < 2:
         return [clause]
+    boundaries = [0] + [m.start() for m in marks[1:]] + [len(body)]
     parts = []
-    for i, m in enumerate(marks):
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(body)
-        piece = body[m.start():end].strip()
-        if len(piece.split()) < MIN_CHUNK_WORDS:
-            continue
-        parts.append({"clause_no": clause["clause_no"], "term": clause["term"],
-                      "label": clause["label"], "body": piece})
+    for i in range(len(boundaries) - 1):
+        piece = body[boundaries[i]:boundaries[i + 1]].strip()
+        if piece:
+            parts.append({"clause_no": clause["clause_no"], "term": clause["term"],
+                          "label": clause["label"], "body": piece})
     return parts or [clause]
+
+
+def extract_signature_blocks(text):
+    from attribution import pairs
+    return list(dict.fromkeys('STATEMENT OF OBJECTS AND REASONS\n' + block for name, block, _ in pairs(text)))
 
 
 def build_chunks(text, meta, slot, source_file):
@@ -390,11 +419,21 @@ def build_chunks(text, meta, slot, source_file):
             if len(piece.split()) >= MIN_CHUNK_WORDS:
                 records.append(make_record(piece, meta, slot, source_file,
                                            "narrative", "", "", ""))
+        # The signature is often laid out as three separate PDF text blocks:
+        # NEW DELHI;, MINISTER NAME., and The date. Paragraph chunking would
+        # split these apart, so preserve the paired name/date as one small
+        # dedicated evidence chunk for the Step 4 introducer lookup.
+        if slot == "billIntroducedFile":
+            existing = {r["text"] for r in records if r.get("part") == "narrative"}
+            for signature in extract_signature_blocks(before):
+                if signature not in existing:
+                    records.append(make_record(signature, meta, slot, source_file,
+                                               "narrative", "", "", "sor-signature-block"))
 
     for clause in parse_operative(after):
         for piece in split_long_clause(clause, SUB_SPLIT_WORDS):
             body = piece["body"]
-            if len(body.split()) < MIN_CLAUSE_WORDS:
+            if not body.strip():
                 continue
             records.append(make_record(body, meta, slot, source_file,
                                        "operative", piece["clause_no"],
@@ -426,7 +465,18 @@ def make_record(body, meta, slot, source_file, part, clause_no, term, label):
     return {
         "chunk_id": "",                      # filled in later, must be unique
         "bill_no": str(meta.get("billNumber", "")).strip(),
+        # The integer form of the bill number, so the brain can match a
+        # question that says "Bill 38" against a Rajya Sabha bill filed as
+        # "XXXVIII". Without it the two spellings never meet, and a question
+        # about the Rajya Sabha bill finds nothing.
+        "bill_no_norm": str(meta.get("bill_number_norm", "") or "").strip(),
         "year": str(meta.get("billYear", "")).strip(),
+        # Which house, and who said so. "Sansad" is the official parliament
+        # API and always wins; "rti" means the Sansad API never published
+        # this bill and the RTI Wiki was the only source. Carried all the way
+        # into the brain so the bot can say where a fact came from.
+        "house": (meta.get("house") or "").strip(),
+        "source_primary": (meta.get("source_primary") or "").strip(),
         "bill_title": (meta.get("billName") or "").strip(),
         "bill_type": (meta.get("billType") or "").strip(),
         "ministry": (meta.get("ministryName") or "").strip(),
@@ -446,47 +496,85 @@ def make_record(body, meta, slot, source_file, part, clause_no, term, label):
 # ------------------------------------------------------------------- dedupe --
 
 def dedupe(records):
-    """
-    Keep one copy of each piece of text per bill.
-
-    The same clause is printed in the introduced file, the LS passed file, the
-    both houses file and the gazette. Those are the same words, so keeping all
-    four just crowds the search results. One copy is kept and the other files
-    it came from are listed in also_in, so nothing is actually lost.
-
-    If two chunks have the same bill and clause number but DIFFERENT text, both
-    are kept, because that is a real difference between the introduced and the
-    passed version of a clause.
-    """
+    """Deduplicate exact operative copies; preserve narrative separately by slot."""
     kept, index = [], {}
     for r in records:
-        head = " ".join(r["text"].lower().split())[:200]
-        key = (r["bill_no"], r["year"], r["part"], r["clause_no"], head)
+        normal = " ".join((r.get("text") or "").casefold().split())
+        digest = hashlib.sha256(normal.encode("utf-8")).hexdigest()
+        # Keep separate copies for intro / passed-LS / passed-RS / gazette.
+        # Identical wording does not make the document stages interchangeable:
+        # Step 4 must be able to cite and filter the correct version.
+        key = ((r.get("house") or "").strip().casefold(),
+               str(r.get("bill_no_norm") or r.get("bill_no") or "").strip().casefold(),
+               str(r.get("year") or "").strip(), r.get("part", ""),
+               str(r.get("clause_no") or "").strip().casefold(),
+               str(r.get("slot") or ""), digest)
         if key in index:
             first = index[key]
-            first["also_in"].append(r["slot"])
-            if len(r["text"]) > len(first["text"]):
-                # keep the fuller copy but remember where the shorter was
-                r["also_in"] = first["also_in"]
-                kept[kept.index(first)] = r
-                index[key] = r
+            source = r.get("source_file", "")
+            if source and source not in first["also_in"]:
+                first["also_in"].append(source)
             continue
-        r["also_in"] = [r["slot"]]
+        r["also_in"] = [r.get("source_file", "")]
         index[key] = r
         kept.append(r)
     return kept
 
 
-# ---------------------------------------------------------------------- main --
-
 def find_metadata(bills_dir):
-    """Load the bill metadata the downloader saved next to the PDFs."""
+    """Load metadata as lists: filename collisions must be resolved, never guessed."""
     for name in ("bills_metadata.csv", "metadata.csv"):
         p = os.path.join(bills_dir, name)
-        if os.path.exists(p):
-            with open(p, encoding="utf-8") as f:
-                return {str(r.get("billNumber")) + "|" + str(r.get("billYear")): r
-                        for r in csv.DictReader(f)}
+        if not os.path.exists(p):
+            continue
+        with open(p, encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            required = {"billName", "billNumber", "billYear"}
+            if not required <= set(reader.fieldnames or []):
+                print("WARNING: %s is not a bill metadata CSV; skipping" % name)
+                continue
+            index = {}
+            for row in reader:
+                raw_no = str(row.get("billNumber") or "").strip().casefold()
+                year = str(row.get("billYear") or "").strip()
+                if not (row.get("house") or "").strip():
+                    row["house"] = (row.get("billIntroducedInHouse") or "").strip()
+                raw, number_norm = normalize_bill_number(raw_no)
+                row["bill_number_norm"] = (str(number_norm) if number_norm is not None
+                                            else str(row.get("bill_number_norm") or "").strip())
+                if raw_no and year:
+                    index.setdefault(raw_no + "|" + year, []).append(row)
+            return index
+    return {}
+
+
+def match_metadata(filename, metadata_index):
+    """Match filename number/year AND title slug; never accept a silent mismatch."""
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    parts = stem.split("_", 3)
+    if len(parts) != 4:
+        return {}
+    _idx, raw_no, year, slug = parts
+    candidates = metadata_index.get(raw_no.strip().casefold() + "|" + year, [])
+
+    def slug_key(value):
+        return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
+
+    wanted = slug_key(slug)
+    if not wanted:
+        print("WARNING: empty title slug in filename %s; skipping" % filename)
+        return {}
+    exact = [r for r in candidates
+             if slug_key(r.get("billName")).startswith(wanted)]
+    if len(exact) == 1:
+        row = exact[0]
+        if not str(row.get("house") or "").strip():
+            print("WARNING: House missing in metadata for %s; skipping" % filename)
+            return {}
+        return row
+    if len(candidates) > 1 or candidates:
+        print("WARNING: metadata match for %s is %s (%d candidates, %d title matches); skipping"
+              % (filename, "ambiguous" if exact else "not verified", len(candidates), len(exact)))
     return {}
 
 
@@ -523,7 +611,7 @@ def main():
     pdf_root = os.path.join(args.indir, "pdfs")
     for root, _dirs, files in os.walk(pdf_root):
         for fn in sorted(files):
-            if not fn.lower().endswith((".pdf", ".doc", ".docx")):
+            if not fn.lower().endswith((".pdf", ".doc", ".docx", ".rtf")):
                 continue
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, pdf_root)
@@ -533,11 +621,18 @@ def main():
                 continue
             # File names are  <index>_<billno>_<year>_<name>.pdf
             # so the bill number is the SECOND field and the year the third.
-            m = re.match(r"\d+_(\d+)_(\d{4})_", fn)
+            #
+            # The bill number must accept Roman numerals. Rajya Sabha numbers
+            # are I, II ... LXXXVIII and Lok Sabha private-member numbers are
+            # like C, CI, CXX. The old pattern used (\d+) here, which matched
+            # 0000_370_2019_... but returned NO MATCH for 0001_XXXVIII_2025_...
+            # -- so every single Rajya Sabha PDF was silently skipped, with
+            # only a "0 of N files matched" message to show for it.
+            # [0-9A-Za-z]+ covers digits, Roman numerals and the C-series alike.
+            m = re.match(r"\d+_([0-9A-Za-z]+)_(\d{4})_", fn)
             if not m:
                 continue
-            key = m.group(1) + "|" + m.group(2)
-            jobs.append((path, slot, fn, meta.get(key, {})))
+            jobs.append((path, slot, fn, match_metadata(fn, meta)))
     if args.max_files:
         jobs = jobs[:args.max_files]
 
@@ -556,11 +651,11 @@ def main():
         print("WARNING: %d of %d files did not match a metadata row"
               % (len(jobs) - matched, len(jobs)))
 
-    # Count bills by number AND year. A bill number on its own is not a bill:
-    # Lok Sabha numbers restart every year, so "Bill No. 82" exists in 22
-    # different years and means 22 different laws. Counting the number alone
-    # reported 374 "bills" for a corpus that really held 3,643.
-    seen_bills = {(j[3].get("billNumber"), j[3].get("billYear"))
+    # Count bills by number AND year AND house. A bill number on its own is
+    # not a bill: Lok Sabha numbers restart every year, so "Bill No. 82"
+    # exists in 22 different years and means 22 different laws. Counting the
+    # number alone reported 374 "bills" for a corpus that really held 3,643.
+    seen_bills = {(j[3].get("house"), j[3].get("billNumber"), j[3].get("billYear"))
                   for j in jobs if j[3]}
     print("found %d downloaded files across %d bills"
           % (len(jobs), len(seen_bills)))
@@ -568,6 +663,10 @@ def main():
 
     all_records, quarantined = [], []
     for n, (path, slot, fn, m) in enumerate(jobs, 1):
+        if not m:
+            quarantined.append(quarantine_row(fn, "META_NOT_FOUND",
+                                              "filename could not be matched to one exact metadata row", {}))
+            continue
         if n % 200 == 0 or n == len(jobs):
             print("  %5d / %5d files   %6d chunks so far"
                   % (n, len(jobs), len(all_records)))

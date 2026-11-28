@@ -10,3 +10,5 @@ chromadb              # Step 3: the vector database, stored on disk
 rank-bm25             # Step 3: plain keyword search, to sit beside the vectors
 flask                 # Step 5: the web chat backend (server.py)
 
+
+streamlit             # Optional: Streamlit chat interface (app.py)

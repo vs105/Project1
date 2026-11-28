@@ -46,6 +46,10 @@ def run(db, n=300, seed=7):
                 tally["WRONG"] += 1
                 wrong.append((b["title"], b["no"], b["year"]))
         print(f"\nAUTO-EVAL {label}: {len(sample)} questions -> {tally}")
+        # Clarifications are acceptable: the DB refused to guess. Wrong and
+        # missed answers are test failures and must make the process exit nonzero.
+        bad += tally["WRONG"] + tally["MISSED"]
         for w in wrong[:5]:
             print("   wrong:", w)
-    print("\nselftest:", "ALL FIXED CHECKS PASSED" if not bad else f"{bad} FIXED CHECK(S) FAILED")
+    print("\nselftest:", "ALL CHECKS PASSED" if not bad else f"{bad} CHECK(S) FAILED")
+    return bad

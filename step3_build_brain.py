@@ -42,7 +42,13 @@ import os
 import pickle
 import re
 import sys
+import threading
 import time
+
+# The Roman -> Arabic converter and the house-detection rule live in bills_db, so
+# that the downloader, the facts layer and the brain all agree on what "Bill
+# XXXVIII" and "Bill 38" mean, and on when a house word names the bill's house.
+from bills_db import normalize_bill_number, HOUSE_BILL
 
 os.environ["ANONYMIZED_TELEMETRY"] = "False"  # stop Chroma phoning home.
 
@@ -67,6 +73,17 @@ RERANK_TEXT = 400         # chars of a clause shown to the re-ranker
 # bill. Asked about the Juvenile Justice Bill, 2015, the top-scoring chunk was
 # the assent line and the answer was procedural noise. These chunks are pushed
 # down, never dropped: for a handful of bills they are the only text there is.
+# What Chroma stores per chunk. "part" and "clause_no" let the talk layer read
+# only the law or only the minister's explanation. "house" and "source_primary"
+# are here because the corpus is 3,678 Lok Sabha plus 1,491 Rajya Sabha bills:
+# without the house, "which Rajya Sabha bills were passed in 2021" cannot be
+# answered from the brain at all, and provenance is lost. This list is also
+# written into fingerprint.json, so adding or removing a field forces a rebuild
+# instead of silently reusing a brain that does not have it.
+META_KEYS = ("bill_no", "bill_no_norm", "bill_title", "year", "term",
+             "ministry", "bill_type", "status", "slot", "language", "part",
+             "clause_no", "label", "house", "source_primary")
+
 TITLE_PAGE_PENALTY = 0.35
 # "BE it enacted" is deliberately NOT in this list. The operative half of every
 # bill begins with the enacting formula, so matching it would demote clause 1 of
@@ -99,7 +116,11 @@ YEAR = re.compile(r"\b(19\d{2}|20\d{2})\b")
 # ("... Finance Bill 2024 about?" gave bill no "2024 about"). That filter
 # matched no bill at all, so the search fell back to UNFILTERED and returned
 # the wrong bill - the real cause of the Q08/Q12 style failures.
-BILLNO = re.compile(r"\bbill\s*(?:no\.?|number|num\.?)?\s*(\d{1,4})\b"
+# A bill number is DIGITS or a ROMAN NUMERAL. The Rajya Sabha files its bills as
+# I, II ... LXXXVIII, so a pattern of (\d{1,4}) alone silently ignores every
+# Rajya Sabha question that quotes a number.
+BILLNO = re.compile(r"\bbill\s*(?:no\.?|number|num\.?)?\s*"
+                    r"(\d{1,4}|[ivxlcdm]{1,8})\b"
                     r"(?:\s*of\s*(\d{4}))?", re.IGNORECASE)
 
 
@@ -144,8 +165,16 @@ def strip_bill_name(question, bill_title=None):
 
 
 def extract_filters(question):
-    """Pulls exact facts from the question: year + bill number (if present)."""
-    year, bill_no = None, None
+    """
+    Pulls exact facts from the question: year, bill number (if present), and
+    which house (if named).
+
+    The house matters because 1,289 (number, year) pairs exist in BOTH houses:
+    Lok Sabha Bill 10 of 2004 and Rajya Sabha Bill X of 2004 are the same
+    number once the Roman form is normalised. A filter without the house would
+    return one house's text for a question about the other's.
+    """
+    year, bill_no, house = None, None, None
     q = (question or "").strip().rstrip("?!.,")  # "What is bill 98?" -> "...bill 98"
     m = YEAR.search(q)
     if m and 1950 <= int(m.group(1)) <= 2030:
@@ -160,7 +189,13 @@ def extract_filters(question):
             continue
         bill_no = n
         break
-    return year, bill_no
+    # Only a house word attached to the word "bill" names the bill's house.
+    # "Bill XXXVIII of 2018 passed by Lok Sabha" is a Rajya Sabha bill that the
+    # Lok Sabha passed, so "Lok Sabha" there is not a filter.
+    mh = HOUSE_BILL.search(q)
+    if mh:
+        house = "Rajya Sabha" if mh.group(1).lower() == "rajya" else "Lok Sabha"
+    return year, bill_no, house
 
 def load_model(model_name):
     """Loads the embedding model, with a friendly error if RAM is too small."""
@@ -194,55 +229,117 @@ def dedupe_ids(chunks):
 # ----------------------------------------------------------------------------
 # STAGE 1+2 - EMBED (with cache: never compute the same vector twice).
 # ----------------------------------------------------------------------------
+def _chunk_cache_key(chunk):
+    """Embedding cache identity includes both stable chunk ID and exact text."""
+    import hashlib
+    text = str(chunk.get("text") or "")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return str(chunk["chunk_id"]) + "|" + digest
+
+
+def _atomic_json(path, value):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(value, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _atomic_npy(path, array):
+    import numpy as np
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        np.save(f, array)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def get_embeddings(chunks, model_name, cache_dir):
-    """Returns vectors aligned with chunks[]. Only embeds what's missing."""
+    """Return vectors aligned with chunks; stale or malformed cache rows are never reused."""
     import numpy as np
 
-    ids = [c["chunk_id"] for c in chunks]
-    by_id = {c["chunk_id"]: c for c in chunks}  # dict lookup: instant at any size.
-    npy_p = f"{cache_dir}/embeddings.npy"
-    ids_p, mod_p = f"{cache_dir}/cache_ids.json", f"{cache_dir}/cache_model.txt"
-    cache_ids, cache_vecs = [], None
-    if os.path.exists(npy_p) and os.path.exists(ids_p):
-        cache_ids = json.load(open(ids_p, encoding="utf-8"))
-        cache_vecs = np.load(npy_p)
-        print(f"      cache found: {len(cache_ids)} vectors on disk")
-        old_model = open(mod_p, encoding="utf-8").read().strip() \
-            if os.path.exists(mod_p) else None
-        if old_model and old_model != model_name:  # vectors are model-specific!
-            sys.exit(f"\nERROR: this brain was built with\n  {old_model}\n"
-                     f"but you asked for\n  {model_name}\n"
-                     "Mixing models silently corrupts search. Fix with ONE of:\n"
-                     "  --rebuild  (rebuild everything with the new model), or\n"
-                     "  --out ./brain2  (keep both brains), or\n"
-                     f"  --model {old_model}  (reuse this brain)\n")
+    keys = [_chunk_cache_key(c) for c in chunks]
+    by_key = {key: c for key, c in zip(keys, chunks)}
+    if len(by_key) != len(keys):
+        raise ValueError("Duplicate embedding cache identities; chunk IDs must be unique")
 
-    missing = [i for i in ids if i not in set(cache_ids)]
+    npy_p = os.path.join(cache_dir, "embeddings.npy")
+    ids_p = os.path.join(cache_dir, "cache_ids.json")
+    mod_p = os.path.join(cache_dir, "cache_model.txt")
+    cache_ids, cache_vecs = [], None
+    valid_cache = False
+
+    if os.path.exists(npy_p) and os.path.exists(ids_p) and os.path.exists(mod_p):
+        try:
+            old_model = open(mod_p, encoding="utf-8").read().strip()
+            old_ids = json.load(open(ids_p, encoding="utf-8"))
+            old_vecs = np.load(npy_p, allow_pickle=False)
+            # Old releases cached by chunk_id alone. Those vectors may belong to
+            # different text under the same ID, so intentionally invalidate them.
+            valid_cache = (
+                old_model == model_name
+                and isinstance(old_ids, list)
+                and all(isinstance(x, str) and "|" in x for x in old_ids)
+                and old_vecs.ndim == 2
+                and old_vecs.shape[0] == len(old_ids)
+                and len(old_ids) == len(set(old_ids))
+                and np.isfinite(old_vecs).all()
+            )
+            if valid_cache:
+                cache_ids, cache_vecs = old_ids, old_vecs
+                print("      content-verified cache found: %d vectors" % len(cache_ids))
+            else:
+                print("      old embedding cache is stale, incompatible or malformed; rebuilding vectors")
+        except Exception as exc:
+            print("      embedding cache could not be read (%s); rebuilding vectors" % type(exc).__name__)
+
+    cache_set = set(cache_ids)
+    missing = [key for key in keys if key not in cache_set]
     if missing:
-        print(f"      embedding {len(missing)} new chunks with {model_name} ...")
-        print("      (first run also downloads the model, one time only)")
+        print("      embedding %d changed/new chunks with %s ..." % (len(missing), model_name))
         model = load_model(model_name)
         t0 = time.time()
-        so_far = 0
-        # Embed in slices and save after each slice. A crash or Ctrl+C can only
-        # lose the current slice, and re-running resumes from the last save.
         for first in range(0, len(missing), CHECKPOINT):
-            part = missing[first:first + CHECKPOINT]
-            texts = [by_id[i]["text"] for i in part]
-            new_vecs = model.encode(texts, batch_size=BATCH, normalize_embeddings=True,
-                                    show_progress_bar=True)
+            part_keys = missing[first:first + CHECKPOINT]
+            texts = [by_key[key]["text"] for key in part_keys]
+            new_vecs = np.asarray(model.encode(
+                texts, batch_size=BATCH, normalize_embeddings=True,
+                show_progress_bar=True), dtype=np.float32)
+            if new_vecs.ndim != 2 or new_vecs.shape[0] != len(part_keys):
+                raise ValueError("Embedding model returned an unexpected vector shape")
+            if cache_vecs is not None and cache_vecs.shape[1] != new_vecs.shape[1]:
+                raise ValueError("Cached and new embedding dimensions differ; clear the brain cache")
             cache_vecs = np.vstack([cache_vecs, new_vecs]) if cache_vecs is not None else new_vecs
-            cache_ids = cache_ids + part
-            np.save(npy_p, cache_vecs)
-            json.dump(cache_ids, open(ids_p, "w", encoding="utf-8"))
-            open(mod_p, "w", encoding="utf-8").write(model_name)
-            so_far += len(part)
-            print(f"      checkpoint saved: {so_far}/{len(missing)} chunks")
+            cache_ids.extend(part_keys)
+            _atomic_npy(npy_p, cache_vecs)
+            _atomic_json(ids_p, cache_ids)
+            tmp_mod = mod_p + ".tmp"
+            with open(tmp_mod, "w", encoding="utf-8") as f:
+                f.write(model_name)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_mod, mod_p)
+            print("      checkpoint saved: %d/%d changed chunks" %
+                  (min(first + len(part_keys), len(missing)), len(missing)))
         dt = time.time() - t0
-        print(f"      {len(missing)} chunks in {dt/60:.1f} min "
-              f"({len(missing)/max(dt,1):.1f}/sec)")
-    pos = {i: n for n, i in enumerate(cache_ids)}
-    return [cache_vecs[pos[i]] for i in ids]
+        print("      embedded %d chunks in %.1f min (%.1f/sec)" %
+              (len(missing), dt / 60, len(missing) / max(dt, 1)))
+
+    if cache_vecs is None:
+        raise RuntimeError("No embeddings were produced")
+    pos = {key: n for n, key in enumerate(cache_ids)}
+    result = np.vstack([cache_vecs[pos[key]] for key in keys])
+    # Compact away stale cache entries. The persisted cache now represents this
+    # exact manifest and preserves row/vector alignment.
+    _atomic_npy(npy_p, result)
+    _atomic_json(ids_p, keys)
+    tmp_mod = mod_p + ".tmp"
+    with open(tmp_mod, "w", encoding="utf-8") as f:
+        f.write(model_name)
+    os.replace(tmp_mod, mod_p)
+    return result
 
 
 # ----------------------------------------------------------------------------
@@ -252,8 +349,24 @@ def build_chroma(chunks, vecs, db_dir, out_dir, model_name, rebuild):
     import chromadb
     # Fingerprint: reuse ONLY if same chunks AND same model. Count alone lies
     # (e.g. test run, then full run, then switching models - all look alike).
+    # The metadata field list is PART of the fingerprint. Without it, adding a
+    # field to what Chroma stores produces exactly the same count, first and
+    # last chunk_id, so the old brain is "reused" and the new field never
+    # appears - the run says everything is fine while the data is a version
+    # behind. That is what would have happened with "house": an existing brain
+    # built before this field existed would have been kept as it was.
+    import hashlib
+    manifest = hashlib.sha256()
+    for c in chunks:
+        text_hash = hashlib.sha256(str(c.get("text") or "").encode("utf-8")).hexdigest()
+        row = {"id": c.get("chunk_id"), "text": text_hash,
+               "metadata": {k: c.get(k, "") for k in META_KEYS}}
+        manifest.update(json.dumps(row, sort_keys=True, ensure_ascii=False,
+                                   separators=(",", ":")).encode("utf-8"))
+        manifest.update(b"\n")
     fp = {"count": len(chunks), "first": chunks[0]["chunk_id"],
-          "last": chunks[-1]["chunk_id"], "model": model_name}
+          "last": chunks[-1]["chunk_id"], "model": model_name,
+          "meta": list(META_KEYS), "manifest_sha256": manifest.hexdigest()}
     fp_p = f"{out_dir}/fingerprint.json"
     old_fp = json.load(open(fp_p, encoding="utf-8")) if os.path.exists(fp_p) else None
     client = chromadb.PersistentClient(path=db_dir)
@@ -281,11 +394,14 @@ def build_chroma(chunks, vecs, db_dir, out_dir, model_name, rebuild):
                 # the law, or only the minister's explanation. They must be in
                 # the database or a provision question can be answered from
                 # background commentary.
-                metadatas=[{k: c.get(k, "") for k in
-                            ("bill_no", "bill_title", "year", "term", "ministry",
-                             "bill_type", "status", "slot", "language",
-                             "part", "clause_no", "label")
-                            } for c in part],
+                # "house" and "source_primary" are in here for a reason:
+                # the corpus is 3,678 Lok Sabha plus 1,491 Rajya Sabha bills,
+                # and without the house a question like "which Rajya Sabha
+                # bills were passed in 2021" cannot be answered from the brain
+                # at all. "source_primary" carries provenance (sansad = the
+                # official API, rti = the RTI Wiki was the only source), so an
+                # answer can say where its fact came from.
+                metadatas=[{k: c.get(k, "") for k in META_KEYS} for c in part],
                 embeddings=[v.tolist() for v in vecs[s:s + 1000]])  # OUR vectors!
     json.dump(fp, open(fp_p, "w", encoding="utf-8"))
     print(f"      stored. DB lives in {db_dir}/ (persists forever)")
@@ -309,8 +425,32 @@ def build_bm25(chunks, path):
 class Brain:
     """Loads everything once, answers questions forever."""
 
+    @property
+    def last_filters(self):
+        # The last resolved bill (year, number, house). In a server this is a
+        # mapping keyed by the calling thread rather than one shared value, so
+        # two users' follow-up questions cannot swap bills.
+        try:
+            return self._filters_by_thread.get(threading.get_ident())
+        except AttributeError:
+            return self._last_filters
+
+    @last_filters.setter
+    def last_filters(self, value):
+        try:
+            self._filters_by_thread[threading.get_ident()] = value
+        except AttributeError:
+            self._last_filters = value
+
     def __init__(self, brain_dir, model_name, rerank=False):
+        self._last_filters = None
+        self._filters_by_thread = {}
         import chromadb
+        # The bill the last question resolved to, as (year, no, house). It MUST
+        # exist from the moment the brain is built: search() only overwrites it,
+        # it never creates it, and the talk layer reads it before the first
+        # search ever runs.
+        self.last_filters = None
         # rerank=True loads a second, small model that reads the question and
         # one clause TOGETHER and scores whether the clause answers it. That is
         # a different question from "is this clause about the same subject",
@@ -330,6 +470,9 @@ class Brain:
         self.col = chromadb.PersistentClient(path=f"{brain_dir}/chroma_db"
                                                ).get_collection("bills")
         self.bm = pickle.load(open(f"{brain_dir}/bm25.pkl", "rb"))
+        if self.col.count() != len(kept):
+            sys.exit(f"\nERROR: Chroma holds {self.col.count()} chunks but kept_chunks.json holds {len(kept)}.\n"
+                     "Rebuild the brain: python step3_build_brain.py --rebuild\n")
         if len(kept) != self.bm.corpus_size:  # hand-edited files? refuse loudly.
             sys.exit(f"\nERROR: brain files disagree in {brain_dir}/\n"
                      f"kept_chunks.json holds {len(kept)} chunks but bm25.pkl "
@@ -348,7 +491,7 @@ class Brain:
             self._reranker = CrossEncoder(RERANK_MODEL, max_length=512)
         return self._reranker
 
-    def chunks_for(self, bill_no, year):
+    def chunks_for(self, bill_no, year, house=None):
         """
         EVERY chunk this brain holds for one bill, in the order the bill is
         written in.
@@ -364,7 +507,8 @@ class Brain:
         """
         no, yr = str(bill_no), str(year)
         mine = [c for c in self.chunks.values()
-                if str(c.get("bill_no")) == no and str(c.get("year")) == yr]
+                if str(c.get("bill_no")) == no and str(c.get("year")) == yr
+                and (not house or str(c.get("house") or "") == house)]
 
         def key(c):
             n = c.get("clause_no") or ""
@@ -399,17 +543,40 @@ class Brain:
         Protection of Children) Bill, 2015" is Bill 99 of 2014, so the year in
         the sentence is 2015 and the bill is 2014.
         """
-        # (a) facts first: year / bill-no filters (exact match, no guessing).
-        year, bill_no = filters if filters else extract_filters(question)
-        self.last_filters = (year, bill_no)  # remembered for follow-up questions.
+        # (a) facts first: year / bill-no / house filters (exact, no guessing).
+        #
+        # `filters` is (year, bill_no, house). The house is not decoration:
+        # 1,289 (number, year) pairs exist in BOTH houses, because Rajya Sabha
+        # "X" and Lok Sabha "10" are the same number once normalised. A filter
+        # of year+number alone can hand back one house's text for a question
+        # about the other's.
+        if filters:
+            year, bill_no = filters[0], filters[1]
+            house = filters[2] if len(filters) > 2 else None
+        else:
+            year, bill_no, house = extract_filters(question)
+        self.last_filters = (year, bill_no, house)  # preserve the complete bill identity.
+
+        # Match the bill on its NORMALISED number, so a question saying "Bill 38"
+        # finds the Rajya Sabha bill filed as "XXXVIII". If the stored chunks
+        # carry no normalised number (a brain built before that column existed)
+        # this falls back to the raw string, which is what the old filter did.
+        no_field, no_val = "bill_no", bill_no
+        if bill_no:
+            _raw, nrm = normalize_bill_number(bill_no)
+            if nrm is not None:
+                no_field, no_val = "bill_no_norm", str(nrm)
+
         where = None
         conds = []
         if year and bill_no:
-            conds = [{"year": year}, {"bill_no": bill_no}]
+            conds = [{"year": str(year)}, {no_field: str(no_val)}]
         elif year:
-            conds = [{"year": year}]
+            conds = [{"year": str(year)}]
         elif bill_no:
-            conds = [{"bill_no": bill_no}]
+            conds = [{no_field: str(no_val)}]
+        if house:
+            conds.append({"house": house})
         if part:
             conds.append({"part": part})
         if len(conds) == 1:
@@ -420,16 +587,8 @@ class Brain:
         qvec = self.model.encode([question], normalize_embeddings=True)[0].tolist()
         res = self.col.query(query_embeddings=[qvec], n_results=TOP_K, where=where)
         filtered = bool(where)
-        if not res["ids"][0] and where and self.year_in_brain(year):
-            # Filter too strict? Retry unfiltered. But NOT when the year is
-            # outside this brain's own years: a 1995 bill simply is not in a
-            # 2004-2026 corpus, and searching unfiltered would answer a 1995
-            # question with a 2024 bill. The part restriction always stays,
-            # because a provision question must never fall back to narrative.
-            retry_where = {"part": part} if part else None
-            res = self.col.query(query_embeddings=[qvec], n_results=TOP_K,
-                                 where=retry_where)
-            filtered = False
+        # Never discard explicit identity filters. An empty result means that
+        # this bill has no indexed text matching the requested stage.
         vec_scores = {i: max(0.0, 1.0 - d)  # cosine distance -> similarity.
                       for i, d in zip(res["ids"][0], res["distances"][0])}
         # (c) ... + word search (BM25) ...
@@ -437,25 +596,33 @@ class Brain:
         key_scores = {}
         if toks:
             scored = self.bm.get_scores(toks)
-            best = sorted(range(len(scored)), key=lambda i: -scored[i])[:TOP_K]
-            mx = scored[best[0]] if best and scored[best[0]] > 0 else 1.0
+            # Filter the candidate universe FIRST, then choose top-K. Filtering
+            # only after global top-K can eliminate every correct-bill match
+            # before the requested bill gets a chance to rank.
+            eligible = []
+            for idx, chunk_id in enumerate(self.order):
+                c = self.chunks[chunk_id]
+                if year and str(c.get("year")) != str(year):
+                    continue
+                if bill_no:
+                    stored = c.get("bill_no_norm")
+                    if stored in (None, ""):
+                        _r, stored_norm = normalize_bill_number(c.get("bill_no"))
+                        stored = str(stored_norm) if stored_norm is not None else str(c.get("bill_no") or "")
+                    if str(stored).casefold() != str(no_val).casefold():
+                        continue
+                if house and str(c.get("house") or "").strip().casefold() != str(house).strip().casefold():
+                    continue
+                if part and c.get("part") != part:
+                    continue
+                eligible.append(idx)
+            best = sorted(eligible, key=lambda i: -float(scored[i]))[:TOP_K]
+            mx = max((float(scored[i]) for i in best), default=0.0)
+            if mx <= 0:
+                mx = 1.0
             for i in best:
-                key_scores[self.order[i]] = float(scored[i] / mx)
-        if filtered:  # keywords must vote INSIDE the filtered set too.
-            # Otherwise a 2024 chunk could sneak into a 2019 answer, or a
-            # narrative chunk could sneak into a provision answer. The vector
-            # half was filtered by the database, but BM25 scores the whole
-            # corpus, so its votes have to be checked here as well. Missing the
-            # part check let the minister's background note score 0.3 from
-            # keywords alone and outrank the real clause.
-            for i in list(key_scores):
-                c = self.chunks[i]
-                if (year and c.get("year") != year):
-                    del key_scores[i]
-                elif (bill_no and c.get("bill_no") != bill_no):
-                    del key_scores[i]
-                elif (part and c.get("part") != part):
-                    del key_scores[i]
+                if scored[i] > 0:
+                    key_scores[self.order[i]] = float(scored[i] / mx)
         # (d) ... merged by weight. Both lists vote; best total wins.
         merged = {}
         for i in set(vec_scores) | set(key_scores):
@@ -507,8 +674,11 @@ class Brain:
         chosen, seen_starts = [], set()
         for i in ranked:
             c = self.chunks[i]
-            start = (c.get("bill_no"), c.get("year"),
-                     " ".join(c["text"][:150].lower().split()))
+            import hashlib
+            start = (c.get("house"), c.get("bill_no_norm") or c.get("bill_no"),
+                     c.get("year"), c.get("part"), c.get("clause_no"),
+                     hashlib.sha256(" ".join(c["text"].casefold().split())
+                                    .encode("utf-8")).hexdigest())
             if start in seen_starts:
                 continue
             seen_starts.add(start)
